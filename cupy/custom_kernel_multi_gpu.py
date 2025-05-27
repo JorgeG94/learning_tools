@@ -1,3 +1,7 @@
+'''
+This file loads a cuda file, compiles it and runs it from python
+using however many devices it can see
+'''
 import cupy as cp
 
 

@@ -1,3 +1,6 @@
+'''
+This file loads a cuda file, compiles it and runs it from python
+'''
 import cupy as cp
 
 # Read the full CUDA source from a file
