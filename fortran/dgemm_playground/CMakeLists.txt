@@ -40,7 +40,7 @@ foreach(target ${targets_gemm})
               >)
   elseif("${CMAKE_Fortran_COMPILER_ID}" STREQUAL "NVHPC")
     target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:Fortran>: 
-                                             -Ktrap=fp >)
+                                             -O3 >)
     if(ENABLE_GPU)
       target_compile_options(
         ${target}
@@ -66,6 +66,7 @@ endforeach()
     -g
     -fopenmp)
   elseif("${CMAKE_Fortran_COMPILER_ID}" STREQUAL "NVHPC")
+if(ENABLE_GPU)
   target_link_options(
     dgemm_benchmark
     PRIVATE
@@ -75,6 +76,7 @@ endforeach()
     -Minfo=mp,accel
     -g
     -traceback)
+  endif()
   endif()
 
 # Link library and OpenMP into executable

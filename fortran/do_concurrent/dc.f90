@@ -1,17 +1,21 @@
-program dgemm_random_benchmark
-  use lib_gemm
+! benchmark for do concurrent
+program dgemm_test
   use omp_lib
   implicit none
 
-  integer :: m, k, n, reps, reps_of_reps
-  integer :: i, j, l, rep, outer_rep
+  integer, parameter :: rk =  SELECTED_REAL_KIND(15, 307)
+  integer :: m, k, n,rep,  reps, reps_of_reps, outer_rep
   real(rk), allocatable :: A(:,:), B(:,:), C(:,:)
+  real(rk), allocatable :: C_naive(:,:), C_dc(:,:)
   real(rk) :: t_start, t_end, flops, gflops
-  integer :: seed_size
+  real(rk) :: t_sanity_start, t_sanity_end
+  integer :: i, j
+  real(rk) :: tol
+  logical :: passed
+  integer :: seed_size, jseed
   integer, allocatable :: seed(:)
   integer :: ios, n_args
   character(len=32) :: arg
-  integer :: thread_id, nthreads
 
   ! Get number of arguments
   n_args = command_argument_count()
@@ -42,25 +46,21 @@ program dgemm_random_benchmark
   read(arg, *, iostat=ios) reps_of_reps
   if (ios /= 0) stop "Error reading reps_of_reps"
 
-  nthreads = omp_get_max_threads()
-  print *, "Using ", nthreads, " threads"
-  print *, "Matrix sizes: m=", m, " k=", k, " n=", n
-  print *, "Reps: ", reps, " Outer reps: ", reps_of_reps
-
   ! Allocate matrices
   allocate(A(m,k), B(k,n), C(m,n))
 
-  ! Initialize RNG
+  ! Seed RNG
   call random_seed(size=seed_size)
   allocate(seed(seed_size))
-  seed = 123456 + 37 * [(j, j=1,seed_size)]
+  seed = 123456 + 37 * [(jseed, jseed=1,seed_size)]
   call random_seed(put=seed)
+
 
   ! Fill A and B with random numbers
   ! Fill A(m,k) with independent random numbers
 do i = 1, m
   do j = 1, k
-    A(i,j) = 1.0d0
+    A(i,j) = 1.0D0
     !call random_number(A(i,j))
   end do
 end do
@@ -68,25 +68,22 @@ end do
 ! Fill B(k,n) with independent random numbers
 do i = 1, k
   do j = 1, n
-    B(i,j) = 1.0d0
+    B(i,j) = 1.0D0
     !call random_number(B(i,j))
   end do
 end do
 
+print *, "Begin sanity check "
 
-  ! Main benchmarking loop
+
   do outer_rep = 1, reps_of_reps
 
      ! Zero C
+   t_start = omp_get_wtime()
+     do rep = 1, reps 
      C = 0.0d0
-     print *, "doing ", reps, " reps"
-     t_start = omp_get_wtime()
-     do i = 1, reps 
-     call naive_omp_dgemm(A,B,C,m,n,k)
-     !call blocked_dgemm(A,B,C,m,n,k)
-     !call simd_dgemm(A,B,C,m,n,k)
-     !call blas_dgemm(A,B,C,m,n,k)
-     end do
+     call do_concurrent_dgemm(A, B, C, m, n, k)
+      end do
     
      t_end = omp_get_wtime()
 
@@ -96,5 +93,35 @@ end do
      print '(A, F12.6, A, F12.6, A, I4)', "Time (s): ", t_end - t_start, "  GFLOPS: ", gflops, "  Rep: ", outer_rep
   end do
 
-end program dgemm_random_benchmark
+
+
+contains 
+
+
+ subroutine do_concurrent_dgemm(A,B,C,m,n,k)
+  implicit none 
+  integer, intent(in) :: m,n,k
+  real(rk), intent(in) :: A(m,k)
+  real(rk), intent(in) :: B(k,n)
+  real(rk), intent(inout) :: C(m,n)
+  real(rk) :: tmp
+  integer :: i,j,l,rep
+  !do concurrent (i = 1:m, j = 1:n)
+  !C(i,j) = 0.0d0
+  !do l = 1, k
+  !  C(i,j) = C(i,j) + A(i,l) * B(l,j)
+  !end do
+  !end do 
+  do concurrent (i = 1:m, j = 1:n)
+  tmp = 0.0d0
+  do l = 1, k
+    tmp = tmp + A(i,l) * B(l,j)
+  end do
+  C(i,j) = tmp
+end do
+
+ end subroutine do_concurrent_dgemm
+
+
+end program dgemm_test
 
