@@ -95,4 +95,24 @@ contains
 
    end subroutine simd_dgemm
 
+   subroutine do_concurrent_dgemm(A, B, C, m, n, k)
+      implicit none
+      integer, intent(in) :: m, n, k
+      real(rk), intent(in) :: A(m, k)
+      real(rk), intent(in) :: B(k, n)
+      real(rk), intent(inout) :: C(m, n)
+      real(rk) :: tmp
+      integer :: i, j, l, rep
+      do concurrent(i=1:m, j=1:n)
+         tmp = 0.0d0
+         do l = 1, k
+            tmp = tmp + A(i, l)*B(l, j)
+         end do
+         C(i, j) = tmp
+      end do
+
+   end subroutine do_concurrent_dgemm
+
+
+
 end module lib_gemm

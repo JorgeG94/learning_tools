@@ -26,36 +26,23 @@ add_executable(dgemm_benchmark ${SRC_DIR}/dgemm_benchmark.f90)
 set(targets_gemm dgemm_lib dgemm_benchmark)
 
 # loop over targets to make sure they all see the necessary things
+set(compile_flags -O3)
 foreach(target ${targets_gemm})
   set_target_properties(${target} PROPERTIES
     Fortran_MODULE_DIRECTORY ${CMAKE_BINARY_DIR}/modules
     )
   if("${CMAKE_Fortran_COMPILER_ID}" STREQUAL "GNU")
-    target_compile_options(
-      ${target}
-      PRIVATE $<$<COMPILE_LANGUAGE:Fortran>:
-              -O3
-              -march=native
-              -g
-              >)
+    list(APPEND compile_flags -march=native -g) 
   elseif("${CMAKE_Fortran_COMPILER_ID}" STREQUAL "NVHPC")
-    target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:Fortran>: 
-                                             -O3 >)
-    if(ENABLE_GPU)
-      target_compile_options(
-        ${target}
-        PRIVATE $<$<COMPILE_LANGUAGE:Fortran>:
-                -O3
-                -mp
-                -mp=gpu
-                -gpu=cc70,lineinfo
-                -Minfo=mp,accel
-                -g
-                -traceback
-                >)
+    if(ENABLE_OMP_OFFLOAD)
+    list(APPEND compile_flags -mp -mp=gpu -gpu=cc70,lineinfo -Minfo=mp,accel -g -traceback)
+    elseif(ENABLE_DC)
+    list(APPEND compile_flags -g -stdpar=gpu,multicore)
     endif()
 
    endif()
+    target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:Fortran>: 
+                                             ${compile_flags} >)
 endforeach()
 
 # for some reason we need to add the link options to pick up these variables, otherwise we don't link and we sad!
@@ -66,17 +53,19 @@ endforeach()
     -g
     -fopenmp)
   elseif("${CMAKE_Fortran_COMPILER_ID}" STREQUAL "NVHPC")
-if(ENABLE_GPU)
+if(ENABLE_OMP_OFFLOAD)
   target_link_options(
     dgemm_benchmark
     PRIVATE
-    -mp
-    -mp=gpu
-    -gpu=cc70,lineinfo
-    -Minfo=mp,accel
-    -g
-    -traceback)
+    ${compile_flags})
+  elseif(ENABLE_DC)
+  target_link_options(
+    dgemm_benchmark
+    PRIVATE
+    ${compile_flags}
+    )
   endif()
+
   endif()
 
 # Link library and OpenMP into executable
