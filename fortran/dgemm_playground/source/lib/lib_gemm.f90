@@ -12,8 +12,8 @@ contains
       real(rk), intent(in) :: B(k, n)
       real(rk), intent(inout) :: C(m, n)
       integer :: i, j, l, rep
-!!$omp target teams distribute parallel do private(i,j,l)
-!$omp parallel do private(i,j,l) schedule(static)
+!!$omp parallel do private(i,j,l) schedule(static)
+!$omp target teams distribute parallel do private(i,j,l)
       do i = 1, m
          do j = 1, n
             do l = 1, k
@@ -21,8 +21,8 @@ contains
             end do
          end do
       end do
-!$omp end parallel do
-!!!$omp end target teams distribute parallel do
+!$omp end target teams distribute parallel do
+!!$omp end parallel do
    end subroutine naive_omp_dgemm
 
    subroutine blocked_dgemm(A, B, C, m, n, k)

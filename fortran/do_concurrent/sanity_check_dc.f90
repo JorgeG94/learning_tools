@@ -129,12 +129,6 @@ contains
       real(rk), intent(inout) :: C(m, n)
       real(rk) :: tmp
       integer :: i, j, l, rep
-      !do concurrent (i = 1:m, j = 1:n)
-      !C(i,j) = 0.0d0
-      !do l = 1, k
-      !  C(i,j) = C(i,j) + A(i,l) * B(l,j)
-      !end do
-      !end do
       do concurrent(i=1:m, j=1:n)
          tmp = 0.0d0
          do l = 1, k
