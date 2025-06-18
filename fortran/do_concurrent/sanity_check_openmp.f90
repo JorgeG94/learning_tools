@@ -66,7 +66,7 @@ program dgemm_test
       end do
    end do
 
-   print *, "Begin sanity check "
+   print *, "Begin sanity check for serial versus OpenMP offloading"
 
    C_naive = 0.0d0
    t_start = omp_get_wtime()
@@ -80,8 +80,6 @@ program dgemm_test
    t_sanity_end = omp_get_wtime()
    time_dc = t_sanity_end - t_sanity_start
 
-   print *, "Time for naive ", time_naive, " s"
-   print *, "Time for do concurrent ", time_dc, " s"
 
    tol = 1.0d-12
    passed = .true.

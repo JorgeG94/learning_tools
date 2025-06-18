@@ -66,7 +66,7 @@ program dgemm_test
       end do
    end do
 
-   print *, "Begin sanity check "
+   print *, "Begin sanity check for serial versus do-concurrent GPU"
 
    C_naive = 0.0d0
    t_start = omp_get_wtime()

@@ -73,7 +73,7 @@ program dgemm_test
       end do
    end do
 
-   print *, "Begin sanity check "
+   print *, "Begin benchmark using Fortran native system clcok "
 
    do outer_rep = 1, reps_of_reps
 
