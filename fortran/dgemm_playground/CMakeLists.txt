@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.15)
-project(DGEMM_BENCHMARK LANGUAGES Fortran)
+project(DGEMM_BENCHMARK LANGUAGES Fortran C)
 
 # Enable OpenMP
 find_package(OpenMP REQUIRED)
-#find_package(BLAS REQUIRED)
+find_package(BLAS REQUIRED)
 
 # === Build the library ===
 set(LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/source/lib)
@@ -14,7 +14,7 @@ add_library(dgemm_lib STATIC
 )
 
 # make sure the libraries see the OpenMP dependency
-target_link_libraries(dgemm_lib PRIVATE OpenMP::OpenMP_Fortran)
+target_link_libraries(dgemm_lib PRIVATE OpenMP::OpenMP_Fortran BLAS::BLAS)
 
 
 # Optional: put module files in clean directory
@@ -27,6 +27,7 @@ set(targets_gemm dgemm_lib dgemm_benchmark)
 
 # loop over targets to make sure they all see the necessary things
 set(compile_flags -O3)
+
 foreach(target ${targets_gemm})
   set_target_properties(${target} PROPERTIES
     Fortran_MODULE_DIRECTORY ${CMAKE_BINARY_DIR}/modules
@@ -35,7 +36,8 @@ foreach(target ${targets_gemm})
     list(APPEND compile_flags -march=native -g) 
   elseif("${CMAKE_Fortran_COMPILER_ID}" STREQUAL "NVHPC")
     if(ENABLE_OMP_OFFLOAD)
-    list(APPEND compile_flags -mp -mp=gpu -gpu=cc70,lineinfo -Minfo=mp,accel -g -traceback)
+    list(APPEND compile_flags -mp=gpu -Minfo=mp,accel -g -traceback)
+    #list(APPEND compile_flags -mp -mp=gpu -gpu=cc70,lineinfo -Minfo=mp,accel -g -traceback)
     elseif(ENABLE_DC)
     list(APPEND compile_flags -g -stdpar=gpu,multicore)
     endif()

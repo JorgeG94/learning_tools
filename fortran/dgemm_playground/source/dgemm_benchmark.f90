@@ -81,11 +81,11 @@ program dgemm_random_benchmark
       print *, "doing ", reps, " reps"
       t_start = omp_get_wtime()
       do i = 1, reps
-         call do_concurrent_dgemm(A,B,C,m,n,k)
+         !call do_concurrent_dgemm(A,B,C,m,n,k)
          !call naive_omp_dgemm(A, B, C, m, n, k)
          !call blocked_dgemm(A,B,C,m,n,k)
          !call simd_dgemm(A,B,C,m,n,k)
-         !call blas_dgemm(A,B,C,m,n,k)
+         call blas_dgemm(A,B,C,m,n,k)
       end do
 
       t_end = omp_get_wtime()

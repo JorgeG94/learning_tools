@@ -13,7 +13,8 @@ contains
       real(rk), intent(inout) :: C(m, n)
       integer :: i, j, l, rep
 !!$omp parallel do private(i,j,l) schedule(static)
-!$omp target teams distribute parallel do private(i,j,l)
+!!!$omp target teams distribute parallel do private(i,j,l) collapse(2)
+!!!$omp target loop collapse(2) private(i,j,l)
       do i = 1, m
          do j = 1, n
             do l = 1, k
@@ -21,7 +22,8 @@ contains
             end do
          end do
       end do
-!$omp end target teams distribute parallel do
+!!!$omp end target loop
+!!!$omp end target teams distribute parallel do
 !!$omp end parallel do
    end subroutine naive_omp_dgemm
 
@@ -32,7 +34,8 @@ contains
       integer :: i, j, l, ii, jj, ll, rep
       integer, parameter :: block_size = 64
 
-!$omp parallel do private(ii,jj,ll,i,j,l) schedule(static)
+!!!$omp parallel do private(ii,jj,ll,i,j,l) schedule(static)
+!!!$omp target loop collapse(2) private(ii,jj,ll,i,j,l)
       do ii = 1, m, block_size
          do jj = 1, n, block_size
             do ll = 1, k, block_size
@@ -48,7 +51,8 @@ contains
             end do
          end do
       end do
-!$omp end parallel do
+!!!$omp end target loop
+!!!$omp end parallel do
 
    end subroutine blocked_dgemm
 
@@ -66,7 +70,7 @@ contains
       alpha = 1.0d0
       beta = 1.0d0
 
-!    call dgemm(transa, transb, m, n, k, alpha, A, m, B, k, beta, C, m)
+    call dgemm(transa, transb, m, n, k, alpha, A, m, B, k, beta, C, m)
    end subroutine blas_dgemm
 
    subroutine simd_dgemm(A, B, C, m, n, k)
