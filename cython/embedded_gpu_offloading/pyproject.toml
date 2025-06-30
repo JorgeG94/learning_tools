@@ -1,0 +1,16 @@
+[build-system]
+build-backend = "mesonpy"
+requires = [
+    "meson-python",
+    "meson", 
+    "ninja",
+    "Cython",   
+    "pybind11",
+    "numpy",
+    "libpython; sys_platform == 'win32'",
+]
+
+
+[project]
+name = 'testo'
+version='0.0.0'
