@@ -1,0 +1,52 @@
+name = "bok"
+version = "0.1.0"
+license = "license"
+author = "Jorge L GV"
+maintainer = "jorgegalvez1694@gmail.com"
+copyright = "Copyright 2025, Jorge L GV"
+
+[[executable]]
+name = "vector_addition"
+source-dir = "."
+main = "vector_addition.f90"
+
+[[executable]]
+name = "hello_from_omp"
+source-dir = "."
+main = "hello_from_omp.f90"
+
+[[executable]]
+name = "sequential_pi"
+source-dir = "."
+main = "sequential_pi.f90"
+
+[[executable]]
+name = "spmd_pi"
+source-dir = "."
+main = "spmd_pi.f90"
+
+[[executable]]
+name = "loop_parallelism_pi"
+source-dir = "."
+main = "loop_parallelism_pi.f90"
+
+[[executable]]
+name = "naive_omp_paralle_dgemm"
+source-dir = "."
+main = "naive_omp_paralle_dgemm.f90"
+[build]
+auto-executables = false
+auto-examples = false
+auto-tests = false
+module-naming = false
+[install]
+library = false
+test = false
+[fortran]
+implicit-typing = false
+implicit-external = false
+source-form = "free"
+
+[dependencies]
+openmp = "*"
+pic.git = "https://github.com/JorgeG94/pic"
