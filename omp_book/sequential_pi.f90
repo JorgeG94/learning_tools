@@ -27,7 +27,7 @@ block
     x = (i + 0.5_dp) * step
     sum = sum + 4.0_dp / (1.0_dp + x*x)
   end do 
-  call pi_timer%end()
+  call pi_timer%stop()
 
   pi = step * sum
   print *, " Pi = " // to_string(pi) // " using "// to_string(num_steps) // " steps and took " // to_string(pi_timer%get_elapsed_time()) // " seconds"

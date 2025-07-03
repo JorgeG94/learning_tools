@@ -49,7 +49,7 @@ block
 end block 
 !$omp end parallel
 
-call pi_timer%end()
+call pi_timer%stop()
 pi = step * sum
 print *, " Pi = " // to_string(pi) // " using "// to_string(num_steps) // " steps and took " // to_string(pi_timer%get_elapsed_time()) // " seconds"
 

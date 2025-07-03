@@ -27,7 +27,7 @@ block
   integer :: i
 
 
-  !$omp single 
+  !$omp single nowait 
     numthreads = omp_get_num_threads() 
   !$omp end single
     !! single implies barrier, the code above is only executed by a single thread
@@ -43,7 +43,7 @@ block
 end block 
 !$omp end parallel
 
-call pi_timer%end()
+call pi_timer%stop()
 pi = step * sum
 print *, " Pi = " // to_string(pi) // " using "// to_string(num_steps) // " steps and took " // to_string(pi_timer%get_elapsed_time()) // " seconds"
 

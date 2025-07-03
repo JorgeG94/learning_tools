@@ -32,7 +32,7 @@ num_threads = omp_get_max_threads()
       end do
     end do
   end do 
-  call my_timer%end()
+  call my_timer%stop()
   print *, " Loop order is i -> j -> l serial"
   call my_timer%print_time()
 
@@ -48,7 +48,7 @@ num_threads = omp_get_max_threads()
     end do
   end do 
   !$omp end parallel do
-  call my_timer%end()
+  call my_timer%stop()
   print *, " Loop order is i -> j -> l and using " // to_string(num_threads) // " threads"
   call my_timer%print_time()
 
@@ -64,7 +64,7 @@ num_threads = omp_get_max_threads()
     end do
   end do
   !$omp end parallel do
-  call my_timer%end()
+  call my_timer%stop()
   print *, " Loop order is j -> i -> l and using " // to_string(num_threads) // " threads"
   call my_timer%print_time()
 
