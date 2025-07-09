@@ -2,6 +2,7 @@ program sequential_pi
 use pic_types, only: dp
 use pic_timers
 use pic_string_utils, only: to_string
+use omp_lib
   !! so we're using my library for some custom cool things like timers and stuff!
 implicit none 
 

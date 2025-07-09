@@ -55,7 +55,7 @@ library = false
 test = false
 [fortran]
 implicit-typing = false
-implicit-external = false
+implicit-external = true
 source-form = "free"
 
 [dependencies]
