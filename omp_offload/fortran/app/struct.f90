@@ -11,7 +11,15 @@ program main
   integer, parameter :: m = 2048
   integer, parameter :: m_count = 3
   integer :: i,j 
-
+! this program is basically the same as normal.f90 except that this 
+! experiments with using derived types (structs) for holding and operating 
+! on variables and arrays on the device using openmp offloading 
+! we have created a derived type called packer which simply holds an allocatable array 
+! the trick here is that this shows that you can have structs with data that are easy to use 
+! on the device and minimize the idea of having to do:
+! call my_subroutine(array_1, array_2, array_3, array_4, array_5, array_6, ...) with 
+! call my_subroutine(my_array_holder_type)
+! and still be good with the GPU
   allocate(A(m,m),B(m,m)) 
   ! allocate the matrix in the struct
   call allocate_C(packer, m, m)
@@ -41,6 +49,7 @@ program main
   time = my_timer%get_elapsed_time()
   print *, "Time for ", m_count, " dgemms ", time, " seconds"
 
+  call dgemm(A,B,packer)
   !$omp end target data
 
   block 

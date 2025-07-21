@@ -2,7 +2,7 @@ program main
   use pic_types, only: dp, int64
   use pic_timers, only: pic_timer_type
   use omp_offloading, only: dscal, dgemm, fill
-  use matrix_packaging, only: matrix_packer_type
+  use matrix_packaging, only: matrix_packer_type, allocate_C
   implicit none
   type(pic_timer_type) :: my_timer
   real(dp) :: time
@@ -11,27 +11,23 @@ program main
   integer, parameter :: m = 2048
   integer, parameter :: m_count = 3
   integer :: i,j 
-! this is a very simple program that uses openmp to do a couple of operations
-! on the GPU naively. First, we allocate the arrays, all symmetirc matrices 
-! we then initialize them to a certain number, I do something like a 
-! dscal (multiply a matrix by a double) and then a naive dgemm. 
-! the purpose of this program is showing how we can use a target data map 
-! region to minimize memory movement between the host and the device 
-! using the same profiler line here, you can see 
-!  Time (%)  Total Time (ns)  Count   Avg (ns)    Med (ns)   Min (ns)  Max (ns)  StdDev (ns)           Operation
-!  --------  ---------------  -----  ----------  ----------  --------  --------  -----------  ----------------------------
-!      62.8         33044177      6   5507362.8   4918649.0       960  12879310    6119738.6  [CUDA memcpy Host-to-Device]
-!      37.2         19542597      1  19542597.0  19542597.0  19542597  19542597          0.0  [CUDA memcpy Device-to-Host]
-! that we've reduced the amount of memcpys that are being done, this is fantastic! 
-! however, it is not always possible to enclose a parallel region inside the omp target data parallel block 
-  allocate(A(m,m),B(m,m), C(m,m)) 
+! this program follows up on the idea that we cannot always have a target data region 
+! enclosing our parallel gpu accelerated subroutines, sometimes this is just not possible 
+! mostly in legacy codebases or just places with bad architecture that are not suitable for this 
+! we use here the target enter data construct which kinda kinda works like a 
+! gpu_malloc(variable) and transfers data to the device
+  allocate(A(m,m),B(m,m)) 
+  ! allocate the matrix in the struct
+  call allocate_C(packer, m, m)
+
 ! there's six H->D copies, A,B,C, 1.0_dp, 1.0_dp, and 0.0_dp 
 ! there's one D->H copy, C
- !$omp target data map(tofrom: C) map(to: A, B)
+ !!$omp target data map(tofrom: packer, packer%C) map(to: A, B)
+ !$omp target enter data map(to: packer, packer%C) map(to: A, B)
   call my_timer%start()
   call fill(A, 1.0_dp)
   call fill(B, 1.0_dp)
-  call fill(C, 0.0_dp)
+  call fill(packer%C, 0.0_dp)
   call my_timer%stop()
   time = my_timer%get_elapsed_time()
   print *, "Time to fill arrays was ", time, " seconds"
@@ -44,13 +40,17 @@ program main
   
   call my_timer%start()
   do i = 1, m_count
-  call dgemm(A,B,C)
+  call dgemm(A,B,packer)
   end do 
   call my_timer%stop()
   time = my_timer%get_elapsed_time()
   print *, "Time for ", m_count, " dgemms ", time, " seconds"
 
-  !$omp end target data
+  call dgemm(A,B,packer)
+
+  !$omp target exit data map(from: packer%C)
+  !if you mimic the target enter and also move back the packer struct, not just its component it will segfaul, god knows why?
+  !!$omp end target data
 
   block 
 
@@ -71,7 +71,8 @@ program main
 
   do i = 1, 4
     do j = 1, 2
-    print *, C(i,j)
+    print *, packer%C(i,j)
     end do
   end do 
+
 end program main
