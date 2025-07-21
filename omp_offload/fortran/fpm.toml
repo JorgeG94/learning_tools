@@ -8,6 +8,7 @@ copyright = "Copyright 2025, Jorge Galvez Vallejo"
 auto-executables = true
 auto-tests = true
 auto-examples = true
+external-modules = ["nvtx"]
 module-naming = false
 [install]
 library = false
@@ -18,3 +19,4 @@ implicit-external = false
 source-form = "free"
 [dependencies]
 pic = { git = "https://github.com/JorgeG94/pic.git", branch = "chore/noblas"}
+openmp = "*"
