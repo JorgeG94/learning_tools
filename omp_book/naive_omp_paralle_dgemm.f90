@@ -2,6 +2,7 @@ program naive_dgemm_omp
 use pic_types
 use pic_timers
 use pic_string_utils, only: to_string
+use omp_lib
 implicit none 
 
 real(dp), allocatable :: A(:,:), B(:,:), C(:,:)
@@ -32,7 +33,7 @@ num_threads = omp_get_max_threads()
       end do
     end do
   end do 
-  call my_timer%end()
+  call my_timer%stop()
   print *, " Loop order is i -> j -> l serial"
   call my_timer%print_time()
 
@@ -48,7 +49,7 @@ num_threads = omp_get_max_threads()
     end do
   end do 
   !$omp end parallel do
-  call my_timer%end()
+  call my_timer%stop()
   print *, " Loop order is i -> j -> l and using " // to_string(num_threads) // " threads"
   call my_timer%print_time()
 
@@ -64,8 +65,24 @@ num_threads = omp_get_max_threads()
     end do
   end do
   !$omp end parallel do
-  call my_timer%end()
+  call my_timer%stop()
   print *, " Loop order is j -> i -> l and using " // to_string(num_threads) // " threads"
+  call my_timer%print_time()
+
+  C = 0.0_dp
+
+  call my_timer%start()
+  !$omp parallel do collapse(2) private(i,j,l) schedule(static) 
+  do j = 1, n
+    do l = 1, k
+      do i = 1, m 
+        C(i,j) = C(i,j) + A(i,l) * B(l,j)
+      end do 
+    end do 
+  end do 
+  !$omp end parallel do 
+  call my_timer%stop()
+  print *, " Loop order is j -> l -> i and using " // to_string(num_threads) // " threads"
   call my_timer%print_time()
 
 end block

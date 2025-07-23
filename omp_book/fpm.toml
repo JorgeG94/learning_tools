@@ -34,6 +34,17 @@ main = "loop_parallelism_pi.f90"
 name = "naive_omp_paralle_dgemm"
 source-dir = "."
 main = "naive_omp_paralle_dgemm.f90"
+
+[[executable]]
+name = "seq_dc_pi"
+source-dir = "."
+main = "seq_dc_pi.f90"
+
+[[executable]]
+name = "omp_tasks_dc_pi"
+source-dir = "."
+main = "omp_tasks_dc_pi.f90"
+
 [build]
 auto-executables = false
 auto-examples = false
@@ -44,7 +55,7 @@ library = false
 test = false
 [fortran]
 implicit-typing = false
-implicit-external = false
+implicit-external = true
 source-form = "free"
 
 [dependencies]
