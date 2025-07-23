@@ -23,7 +23,8 @@ program main
 ! there's six H->D copies, A,B,C, 1.0_dp, 1.0_dp, and 0.0_dp 
 ! there's one D->H copy, C
  !!$omp target data map(tofrom: packer, packer%C) map(to: A, B)
- !$omp target enter data map(to: packer, packer%C) map(to: A, B)
+ !$omp target enter data map(alloc: A, B, packer, packer%C)
+ !!$omp target enter data map(to: packer, packer%C) map(to: A, B)
   call my_timer%start()
   call fill(A, 1.0_dp)
   call fill(B, 1.0_dp)
@@ -48,7 +49,9 @@ program main
 
   call dgemm(A,B,packer)
 
-  !$omp target exit data map(from: packer%C)
+  !$omp target update from(packer%C)
+  !$omp target exit data map(release: A, B, packer, packer%C)
+  !!$omp target exit data map(from: packer%C)
   !if you mimic the target enter and also move back the packer struct, not just its component it will segfaul, god knows why?
   !!$omp end target data
 
