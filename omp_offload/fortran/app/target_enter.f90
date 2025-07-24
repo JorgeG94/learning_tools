@@ -2,7 +2,9 @@ program main
   use pic_types, only: dp, int64
   use pic_timers, only: pic_timer_type
   use omp_offloading, only: dscal, dgemm, fill
+  use pic_string_utils, only: to_string
   use matrix_packaging, only: matrix_packer_type, allocate_C
+  use nvtx
   implicit none
   type(pic_timer_type) :: my_timer
   real(dp) :: time
@@ -25,29 +27,37 @@ program main
  !!$omp target data map(tofrom: packer, packer%C) map(to: A, B)
  !$omp target enter data map(alloc: A, B, packer, packer%C)
  !!$omp target enter data map(to: packer, packer%C) map(to: A, B)
+ call nvtxStartRange(" Fill")
   call my_timer%start()
   call fill(A, 1.0_dp)
   call fill(B, 1.0_dp)
   call fill(packer%C, 0.0_dp)
   call my_timer%stop()
   time = my_timer%get_elapsed_time()
+  call nvtxEndRange
   print *, "Time to fill arrays was ", time, " seconds"
 
   call my_timer%start()
+ call nvtxStartRange("dscal ")
   call dscal(A, 2.0_dp)
+  call nvtxEndRange
   call my_timer%stop()
   time = my_timer%get_elapsed_time()
   print *, "Time for dscal ", time, " seconds"
   
   call my_timer%start()
   do i = 1, m_count
+  call nvtxStartRange("dgemm loop index" // to_string(i))
   call dgemm(A,B,packer)
+  call nvtxEndRange
   end do 
   call my_timer%stop()
   time = my_timer%get_elapsed_time()
   print *, "Time for ", m_count, " dgemms ", time, " seconds"
 
+  call nvtxStartRange("what is this")
   call dgemm(A,B,packer)
+  call nvtxEndRange
 
   !$omp target update from(packer%C)
   !$omp target exit data map(release: A, B, packer, packer%C)
