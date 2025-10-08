@@ -46,14 +46,14 @@ program nbody_sync
     do step = 1, max_steps
         call evolve_system(n_bodies, x, y, z, vx, vy, vz, mass, dt, G, softening, az, ay, az)
         
-        if (mod(step, output_interval) == 0) then
-        !$omp target update from(x,y,z,vx,vy,vz)
-            call write_output(step, n_bodies, x, y, z, vx, vy, vz)
-            step_end = omp_get_wtime()
-            print '(a,i6,a,f8.5,a)', "Step:", step, " (evolve took ", &
-                step_end - step_start, "s)"
-            step_start = step_end
-        end if
+!        if (mod(step, output_interval) == 0) then
+!        !$omp target update from(x,y,z,vx,vy,vz)
+!            call write_output(step, n_bodies, x, y, z, vx, vy, vz)
+!            step_end = omp_get_wtime()
+!            print '(a,i6,a,f8.5,a)', "Step:", step, " (evolve took ", &
+!                step_end - step_start, "s)"
+!            step_start = step_end
+!        end if
     end do
     
     end_time = omp_get_wtime()
@@ -61,6 +61,7 @@ program nbody_sync
     print *, ""
     print *, "Simulation complete!"
     print *, "Time elapsed:", end_time - start_time, "seconds"
+    print *, "Time per step ", 1000.0_dp*(end_time - start_time)/real(step,dp), " mseconds"
     
     !$omp target exit data map(release: x, y, z, vx, vy, vz, mass, ax, ay,az)
 
@@ -105,7 +106,10 @@ contains
         
         real(dp) :: dx, dy, dz, dist_sq, dist, force_mag
         real(dp) :: ax_local, ay_local, az_local
-        integer :: i, j
+        real(dp) :: xi, yi, zi, ax_i, ay_i, az_i 
+        real(dp) :: r2, invr, f, eps2, invr3, m
+       integer :: i, j
+       eps2 = eps*eps
         
         ! Compute accelerations
         !$omp target teams loop
@@ -114,40 +118,45 @@ contains
           ay(i) = 0.0_dp
           az(i) = 0.0_dp
         end do 
-        
-        ! Parallel loop over particles (each thread computes forces on subset)
-        !$omp target teams loop 
+
+ 
+        !$omp target teams distribute parallel do num_teams(5120) thread_limit(128)  
         do i = 1, n
             ax_local = 0.0_dp
             ay_local = 0.0_dp
             az_local = 0.0_dp
+            xi = x(i)
+            yi = y(i)
+            zi = z(i)
             
-            ! Compute force on particle i from all other particles
+            !$omp simd reduction(+:ax_local,ay_local,az_local) private(dx,dy,dz,dist_sq,invr,invr3,force_mag)
             do j = 1, n
                 if (i /= j) then
-                    dx = x(j) - x(i)
-                    dy = y(j) - y(i)
-                    dz = z(j) - z(i)
-                    
-                    dist_sq = dx*dx + dy*dy + dz*dz + eps*eps
-                    dist = sqrt(dist_sq)
-                    force_mag = G * mass(j) / (dist * dist_sq)
+                    dx = x(j) - xi
+                    dy = y(j) - yi
+                    dz = z(j) - zi
+                    dist_sq = dx*dx + dy*dy + dz*dz + eps2
+                    invr  = 1.0_dp / sqrt(dist_sq)
+                    invr3 = invr * invr * invr
+                    force_mag = G * mass(j) * invr3
                     
                     ax_local = ax_local + force_mag * dx
                     ay_local = ay_local + force_mag * dy
                     az_local = az_local + force_mag * dz
                 end if
             end do
+            !$omp end simd
             
             ax(i) = ax_local
             ay(i) = ay_local
             az(i) = az_local
         end do
-        !$omp end target teams loop
+        !$omp end target teams distribute parallel do 
         
         ! Update velocities and positions (Euler integration)
         !$omp target teams loop 
         do i = 1, n
+
             vx(i) = vx(i) + ax(i) * dt
             vy(i) = vy(i) + ay(i) * dt
             vz(i) = vz(i) + az(i) * dt
