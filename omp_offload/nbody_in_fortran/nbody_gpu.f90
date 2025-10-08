@@ -46,14 +46,14 @@ program nbody_sync
     do step = 1, max_steps
         call evolve_system(n_bodies, x, y, z, vx, vy, vz, mass, dt, G, softening, az, ay, az)
         
-!        if (mod(step, output_interval) == 0) then
-!        !$omp target update from(x,y,z,vx,vy,vz)
-!            call write_output(step, n_bodies, x, y, z, vx, vy, vz)
-!            step_end = omp_get_wtime()
-!            print '(a,i6,a,f8.5,a)', "Step:", step, " (evolve took ", &
-!                step_end - step_start, "s)"
-!            step_start = step_end
-!        end if
+        if (mod(step, output_interval) == 0) then
+        !$omp target update from(x,y,z,vx,vy,vz)
+            call write_output(step, n_bodies, x, y, z, vx, vy, vz)
+            step_end = omp_get_wtime()
+            print '(a,i6,a,f8.5,a)', "Step:", step, " (evolve took ", &
+                step_end - step_start, "s)"
+            step_start = step_end
+        end if
     end do
     
     end_time = omp_get_wtime()
