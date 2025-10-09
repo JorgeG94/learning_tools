@@ -106,7 +106,7 @@ contains
         
         real(dp) :: dx, dy, dz, dist_sq, dist, force_mag
         real(dp) :: ax_local, ay_local, az_local
-        real(dp) :: xi, yi, zi, ax_i, ay_i, az_i 
+        real(dp) :: xi, yi, zi, ax_local, ay_local, az_local 
         real(dp) :: r2, invr, f, eps2, invr3, m
        integer :: i, j
        eps2 = eps*eps
@@ -118,8 +118,34 @@ contains
           ay(i) = 0.0_dp
           az(i) = 0.0_dp
         end do 
-
- 
+#ifdef USE_DC
+        do concurrent (i = 1:n)
+        
+          xi = x(i); yi = y(i); zi = z(i)
+          ax_local = 0.0_dp
+          ay_local = 0.0_dp
+          az_local = 0.0_dp
+        
+          do concurrent (j = 1:n) reduce(+: ax_local, ay_local, az_local)
+            if (i /= j) then
+              dx = x(j) - xi
+              dy = y(j) - yi
+              dz = z(j) - zi
+              dist_sq  = dx*dx + dy*dy + dz*dz + eps2
+              invr     = 1.0_dp / sqrt(dist_sq)
+              invr3    = invr * invr * invr
+              force_mag = G * mass(j) * invr3
+              ax_local = ax_local + force_mag * dx
+              ay_local = ay_local + force_mag * dy
+              az_local = az_local + force_mag * dz
+            end if
+          end do
+        
+          ax(i) = ax_local
+          ay(i) = ay_local
+          az(i) = az_local
+        end do
+#else
         !$omp target teams distribute parallel do num_teams(5120) thread_limit(128)  
         do i = 1, n
             ax_local = 0.0_dp
@@ -152,7 +178,7 @@ contains
             az(i) = az_local
         end do
         !$omp end target teams distribute parallel do 
-        
+#endif 
         ! Update velocities and positions (Euler integration)
         !$omp target teams loop 
         do i = 1, n
