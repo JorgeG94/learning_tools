@@ -87,7 +87,7 @@ spack install -j64 magma@2.8.0 +rocm ~cuda amdgpu_target=gfx90a
 spack install -j64 magma@2.8.0 %cce@16.0.1 +rocm ~cuda amdgpu_target=gfx90a
 
 ```
-### MPI 4.x
+### OpenMPI 4.x
 
 This won't build any GPU aware MPI versions. It is a pain with OpenMPI 4.x
 ```
@@ -102,7 +102,7 @@ make -j install
 ```
 CC=nvc CXX=nvc++ FC=nvfortran FCFLAGS="-Mstandard -fPIC" CFLAGS="-mno-hle -fPIC" CXXFLAGS="-fPIC" ./configure --enable-mpi-fortran --enable-mpi-cxx --prefix=$HOME/install/nvhpc/24.5/openmpi/4.1.4
 ```
-### MPI 5.x 
+### OpenMPI 5.x 
 
 This will build a cuda aware version of MPI. Point to the correct lcoation of your cuda install
 ```
@@ -115,11 +115,37 @@ make -j install
 
 If configuring MPI 5.x fails with pmix not found append `--with-pmix=internal
 
+#### No cuda 
+
+This is mostly because I had issues when building OpenMPI with flang and it complaining about not finding the prterun. For some reason it was not compiled. 
+```
+wget https://download.open-mpi.org/release/open-mpi/v4.1/openmpi-5.0.5.tar.gz
+tar -xvf openmpi-5.0.5.tar.gz
+cd openmpi-5.0.5
+./configure --prefix=$HOME/install/openmpi-5.0.5 
+make -j install
+```
+
+
 #### with nvhpc 
 
 ```
 CC=nvc CXX=nvc++ FC=nvfortran FCFLAGS="-Mstandard -fPIC" CFLAGS="-mno-hle -fPIC" CXXFLAGS="-fPIC" ./configure --enable-mpi-fortran --prefix=$HOME/install/nvhpc/24.5/openmpi/5.0.5
 ```
+
+### MPICH 
+If you're building to target and bind to Fortran use the "system" gcc or the oldest version of gcc you have (if supporting multiple versions, like I do). If 
+you are not doing Fortran codes, you can just build with any version of the C compiler, the ABI is quite stable. 
+
+
+```
+wget https://www.mpich.org/static/downloads/4.3.2/mpich-4.3.2.tar.gz
+tar -xvf mpich-4.3.2.tar.gz
+cd mpich-4.3.2
+./configure --prefix=$MPICH_ROOT
+make -j install
+```
+
 
 ### HDF5 
 
