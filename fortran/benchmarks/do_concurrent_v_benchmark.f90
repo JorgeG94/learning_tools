@@ -170,7 +170,7 @@ program loop_order_sweep_do_concurrent_safe
   !---------------------------------------------------------
   ! 🧾 CSV summary
   print *
-  print *, "Nz,vertical->i->j,i->j->vertical,j->vertical->i,vertical->j->i,j->i->k"
+  print *, "Nz,k->i->j,i->j->k,j->k->i,k->j->i,j->i->k"
   do idx = 1, ntests
      write(*,'(I5,5(",",F12.6))') nz_values(idx), timings(idx,1), timings(idx,2), &
                                    timings(idx,3), timings(idx,4), timings(idx,5)
