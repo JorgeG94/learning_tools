@@ -129,7 +129,7 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
      !=========================================================
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
      call cpu_time(t1)
-     do concurrent (j=1:ny, i=1:nx)
+     do concurrent (i=1:nx, j=1:ny)
         if (mask(i,j) <= 0.0_real64) cycle
         do k = 2, nz-1
            a_loc   = a3d(i,j,k)
