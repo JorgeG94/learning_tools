@@ -17,6 +17,13 @@ see how the code behaves. The loop orderings are:
 
 The Makefile right now is jerry rigged to use nvfortan. Will extend later. Just `make`.
 
+
+### Flags for GPU offloading 
+
+- NVIDIA: `nvfortran -mp=gpu -stdpar=gpu -gpu=mem:separate`
+- AMD:    `amdflang -fopenmp --offload-arch=gfx90a -fdo-concurrent-to-openmp=device`
+- INTEL:  `ifx -fiopenmp -fopenmp-targets=spir64  -fopenmp-target-do-concurrent  -fopenmp-do-concurrent-maptype-modifier=none`
+
 ## Details of implementations 
 
 I do a very simple stencil like computation over the layers and horizontal points. The 
