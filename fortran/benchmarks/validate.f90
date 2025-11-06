@@ -1,5 +1,6 @@
   program loop_order_sweep_do_concurrent_tridiag_reuse
   use iso_fortran_env, only: real64
+  use omp_lib, only: omp_get_wtime
   implicit none
 
   integer, parameter :: nz_values(*) = [400]
@@ -101,7 +102,8 @@
      ! 1. vertical -> i -> j
      !    k outer (serial), inside parallel over (i,j)
      !=========================================================
-     call cpu_time(t1)
+     !call cpu_time(t1)
+     t1 = omp_get_wtime()
      do k = 2, nz-1
         do concurrent (i=1:nx)
            do concurrent (j=1:ny)
@@ -133,7 +135,8 @@
            end do
         end do
      end do
-     call cpu_time(t2)
+     !call cpu_time(t2)
+     t2 = omp_get_wtime()
      timings(idx,1) = t2 - t1
      !$omp target update from(d1)
      d1_1 = d1(1,17)
@@ -145,7 +148,8 @@
      !    parallel over (i,j), inner serial k
      !=========================================================
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
-     call cpu_time(t1)
+     t1 = omp_get_wtime()
+     !call cpu_time(t1)
      do concurrent (i=1:nx, j=1:ny)
         if (mask(i,j) <= 0.0_real64) cycle
         do k = 2, nz-1
@@ -169,9 +173,9 @@
            d1(i,j) = d1_loc
         end do
      end do
+     t2 = omp_get_wtime()
      !$omp target update from(d1)
      d1_2 = d1(1,17)
-     call cpu_time(t2)
      timings(idx,2) = t2 - t1
      print '(A,F10.4," s")', " i->j->vertical elapsed:        ", timings(idx,2)
      print '(A,F10.4," GFLOP/s")', " i->j->vertical flop rate:        ", flops(idx)/timings(idx,2)
@@ -181,7 +185,7 @@
      !    parallel over j, inner serial k, inner concurrent i
      !=========================================================
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
-     call cpu_time(t1)
+     t1 = omp_get_wtime()
      do concurrent (j=1:ny)
         do k = 2, nz-1
            do concurrent (i=1:nx)
@@ -208,7 +212,7 @@
            end do
         end do
      end do
-     call cpu_time(t2)
+     t2 = omp_get_wtime()
      !$omp target update from(d1)
      d1_3 = d1(1,17)
      timings(idx,3) = t2 - t1
@@ -220,7 +224,7 @@
      !    k outer, then concurrent j, then concurrent i
      !=========================================================
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
-     call cpu_time(t1)
+     t1 = omp_get_wtime()
      do k = 2, nz-1
         do concurrent (j=1:ny)
            do concurrent (i=1:nx)
@@ -247,7 +251,7 @@
            end do
         end do
      end do
-     call cpu_time(t2)
+     t2 = omp_get_wtime()
      !$omp target update from(d1)
      d1_4 = d1(1,17)
      timings(idx,4) = t2 - t1
@@ -259,7 +263,7 @@
      !    concurrent over j,i, then serial k
      !=========================================================
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
-     call cpu_time(t1)
+     t1 = omp_get_wtime()
      do concurrent (j=1:ny, i=1:nx)
         if (mask(i,j) <= 0.0_real64) cycle
         do k = 2, nz-1
@@ -283,7 +287,7 @@
            d1(i,j) = d1_loc
         end do
      end do
-     call cpu_time(t2)
+     t2 = omp_get_wtime()
      !$omp target update from(d1)
      d1_5 = d1(1,17)
      timings(idx,5) = t2 - t1
