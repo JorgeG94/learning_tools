@@ -3,8 +3,8 @@
   use omp_lib, only: omp_get_wtime
   implicit none
 
-  integer, parameter :: nz_values(*) = [400]
-  !integer, parameter :: nz_values(*) = [10, 25, 50, 100, 200, 400]
+  !integer, parameter :: nz_values(*) = [400]
+  integer, parameter :: nz_values(*) = [10, 25, 50, 100, 200, 400]
   integer, parameter :: ntests = size(nz_values)
 
   integer :: nx, ny, nz, narg
@@ -65,7 +65,7 @@
 
      call random_number(val)
 
-     flops(idx) = real((nz - 2) * ny * nx * 15,real64)/1e9
+     flops(idx) = real((nz - 2),real64) * real(ny,real64) * real(nx,real64) * real(15,real64)/real(1e9,real64)
      print *, flops(idx)
 
      !------------------------------------------
