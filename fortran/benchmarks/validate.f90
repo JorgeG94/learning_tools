@@ -21,6 +21,7 @@
 
   real(real64) :: dt, t1, t2
   real(real64) :: timings(ntests,5)
+  real(real64) :: flops(ntests)
   real(real64) :: val
   real(real64) :: a_loc, h_loc, ray_loc, b1_loc, d1_loc, b_denom, u_prev, u_loc
   real(real64), parameter :: one = 1.0_real64, zero = 0.0_real64
@@ -63,6 +64,9 @@
 
      call random_number(val)
 
+     flops(idx) = real((nz - 2) * ny * nx * 15,real64)/1e9
+     print *, flops(idx)
+
      !------------------------------------------
      ! Move arrays to device (no copy) via OpenMP
      !------------------------------------------
@@ -99,8 +103,8 @@
      !=========================================================
      call cpu_time(t1)
      do k = 2, nz-1
-        do concurrent (j=1:ny)
-           do concurrent (i=1:nx)
+        do concurrent (i=1:nx)
+           do concurrent (j=1:ny)
               if (mask(i,j) <= 0.0_real64) cycle
 
               a_loc   = a3d(i,j,k)
@@ -109,13 +113,18 @@
               b1_loc  = b1(i,j)
               d1_loc  = d1(i,j)
 
+              ! 3 multiplies 
               c1(i,j,k) = dt * a_loc * b1_loc
 
+              ! 1 add 1 multiplty 1 add 1 multiply
               b_denom = h_loc + dt * (ray_loc + a_loc * d1_loc)
+              ! 1 divide 1 add 1 multiplity
               b1_loc  = one / (b_denom + dt * a3d(i,j,k+1))
+              ! 1 multiply
               d1_loc  = b_denom * b1_loc
 
               u_prev  = unew(i,j,k-1)
+              ! 1 mul 1 add 1 mul 1 mul 1 mul
               u_loc   = (h_loc * u(i,j,k) + dt * a_loc * u_prev) * b1_loc
               unew(i,j,k) = u_loc
 
@@ -129,6 +138,7 @@
      !$omp target update from(d1)
      d1_1 = d1(1,17)
      print '(A,F10.4," s")', " vertical->i->j elapsed:       ", timings(idx,1)
+     print '(A,F10.4," GFLOP/s")', " vertical->i->j flop rate:       ", flops(idx)/timings(idx,1)
 
      !=========================================================
      ! 2. i -> j -> vertical
@@ -136,7 +146,7 @@
      !=========================================================
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
      call cpu_time(t1)
-     do concurrent (j=1:ny, i=1:nx)
+     do concurrent (i=1:nx, j=1:ny)
         if (mask(i,j) <= 0.0_real64) cycle
         do k = 2, nz-1
            a_loc   = a3d(i,j,k)
@@ -164,6 +174,7 @@
      call cpu_time(t2)
      timings(idx,2) = t2 - t1
      print '(A,F10.4," s")', " i->j->vertical elapsed:        ", timings(idx,2)
+     print '(A,F10.4," GFLOP/s")', " i->j->vertical flop rate:        ", flops(idx)/timings(idx,2)
 
      !=========================================================
      ! 3. j -> vertical -> i
@@ -202,6 +213,7 @@
      d1_3 = d1(1,17)
      timings(idx,3) = t2 - t1
      print '(A,F10.4," s")', " j->vertical->i elapsed:        ", timings(idx,3)
+     print '(A,F10.4," GFLOP/s")', " j->vertical->i flop rate:        ", flops(idx)/timings(idx,3)
 
      !=========================================================
      ! 4. vertical -> j -> i
@@ -240,6 +252,7 @@
      d1_4 = d1(1,17)
      timings(idx,4) = t2 - t1
      print '(A,F10.4," s")', " vertical->j->i elapsed:        ", timings(idx,4)
+     print '(A,F10.4," GFLOP/s")', " vertical->j->i flop rate:        ", flops(idx)/timings(idx,4)
 
      !=========================================================
      ! 5. j -> i -> vertical
@@ -275,6 +288,7 @@
      d1_5 = d1(1,17)
      timings(idx,5) = t2 - t1
      print '(A,F10.4," s")', " j->i->vertical elapsed:        ", timings(idx,5)
+     print '(A,F10.4," GFLOP/s")', " j->i->vertical flop rate:        ", flops(idx)/timings(idx,5)
 
      !------------------------------------------
      ! Free device and host memory
