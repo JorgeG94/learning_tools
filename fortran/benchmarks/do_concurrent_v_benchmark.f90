@@ -51,6 +51,7 @@ program loop_order_sweep_do_concurrent_safe
      !B = A; C = A; D = A
      !Anew = A; Bnew = B; Cnew = C; Dnew = D
      !$omp target enter data map(alloc: A,B,C,D,Anew, Bnew, Cnew, Dnew)
+    ! if you don't do this on the GPU it is hella slow
     do concurrent (i=1:nx, j=1:ny, k=1:nz)
      A(i,j,k) = val 
      B(i,j,k) = val 
