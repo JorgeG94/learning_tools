@@ -24,6 +24,12 @@ The Makefile right now is jerry rigged to use nvfortan. Will extend later. Just 
 - AMD:    `amdflang -fopenmp --offload-arch=gfx90a -fdo-concurrent-to-openmp=device`
 - INTEL:  `ifx -fiopenmp -fopenmp-targets=spir64  -fopenmp-target-do-concurrent  -fopenmp-do-concurrent-maptype-modifier=none`
 
+
+*PSA ON AMD*: AMD launches asynch kernels, set `OMPX_FORCE_SYNC_REGIONS=1` to make them not asynch, otherwise you get sick timings
+See: https://rocm.docs.amd.com/en/docs-6.1.0/about/compatibility/openmp.html#environment-variables
+
+
+
 ## Details of implementations 
 
 I do a very simple stencil like computation over the layers and horizontal points. The 
