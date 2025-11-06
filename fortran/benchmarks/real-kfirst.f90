@@ -1,0 +1,304 @@
+program loop_order_sweep_do_concurrent_tridiag_reuse
+  use iso_fortran_env, only: real64
+  implicit none
+
+  integer, parameter :: nz_values(*) = [10, 25, 50, 100, 200, 400]
+  integer, parameter :: ntests = size(nz_values)
+
+  integer :: nx, ny, nz, narg
+  integer :: i, j, k, idx
+  character(len=32) :: arg
+
+  ! 3D coefficient / state fields
+  real(real64), allocatable :: a3d(:,:,:), h3d(:,:,:)
+  real(real64), allocatable :: u(:,:,:),   unew(:,:,:), c1(:,:,:)
+
+  ! 2D fields
+  real(real64), allocatable :: ray(:,:), mask(:,:), b1(:,:), d1(:,:)
+
+  real(real64) :: dt, t1, t2
+  real(real64) :: timings(ntests,5)
+  real(real64) :: val
+  real(real64) :: a_loc, h_loc, ray_loc, b1_loc, d1_loc, b_denom, u_prev, u_loc
+  real(real64), parameter :: one = 1.0_real64, zero = 0.0_real64
+
+  !----------------------------------
+  ! Command-line argument parsing
+  !----------------------------------
+  narg = command_argument_count()
+  nx = 256
+  ny = 256
+  if (narg >= 1) then
+     call get_command_argument(1, arg)
+     read(arg, *) nx
+  end if
+  if (narg >= 2) then
+     call get_command_argument(2, arg)
+     read(arg, *) ny
+  end if
+
+  dt = 0.01_real64
+
+  print *, "===================================================="
+  print *, " DO CONCURRENT tridiag-like benchmark (reused arrays)"
+  write(*,'(" Grid config (nx, ny) = (",I0,", ",I0,")")') nx, ny
+  print *, "===================================================="
+
+  do idx = 1, ntests
+     nz = nz_values(idx)
+     print *
+     print '(A,I5)', ">>> Testing Nz = ", nz
+     print *, "---------------------------------------------"
+
+     ! Allocate fields
+     allocate(a3d(nz,nx,ny), h3d(nz,nx,ny))
+     allocate(u(nz,nx,ny),   unew(nz,nx,ny), c1(nz,nx,ny))
+     allocate(ray(nx,ny), mask(nx,ny), b1(nx,ny), d1(nx,ny))
+
+     call random_number(val)
+
+     !------------------------------------------
+     ! Move arrays to device (no copy) via OpenMP
+     !------------------------------------------
+     !$omp target enter data map(alloc: a3d,h3d,u,unew,c1,ray,mask,b1,d1)
+
+     !------------------------------------------
+     ! Initial coefficients and initial state
+     ! (done on device through do concurrent)
+     !------------------------------------------
+     do concurrent (i=1:nx, j=1:ny, k=1:nz)
+        ! 3D coefficients
+        a3d(k,i,j)  = 0.1_real64
+        h3d(k,i,j)  = 1.0_real64
+
+        ! Initial u field
+        u(k,i,j)    = val
+        unew(k,i,j) = u(k,i,j)
+
+        c1(k,i,j)   = 0.0_real64
+
+        ! 2D fields, once per (i,j)
+        if (k == 1) then
+           ray(i,j)  = 0.01_real64
+           mask(i,j) = 1.0_real64   ! all active; structural mask
+           b1(i,j)   = 0.0_real64
+           d1(i,j)   = 0.0_real64
+        end if
+     end do
+
+
+     !=========================================================
+     ! 1. vertical -> i -> j
+     !    k outer (serial), inside parallel over (i,j)
+     !=========================================================
+     call reset_state(nz,nx,ny,u,unew,c1,b1,d1)
+     call cpu_time(t1)
+     do k = 2, nz-1
+        do concurrent (j=1:ny)
+           do concurrent (i=1:nx)
+              if (mask(i,j) <= 0.0_real64) cycle
+
+              a_loc   = a3d(k,i,j)
+              h_loc   = h3d(k,i,j)
+              ray_loc = ray(i,j)
+              b1_loc  = b1(i,j)
+              d1_loc  = d1(i,j)
+
+              c1(k,i,j) = dt * a_loc * b1_loc
+
+              b_denom = h_loc + dt * (ray_loc + a_loc * d1_loc)
+              b1_loc  = one / (b_denom + dt * a3d(k+1,i,j))
+              d1_loc  = b_denom * b1_loc
+
+              u_prev  = unew(k-1,i,j)
+              u_loc   = (h_loc * u(k,i,j) + dt * a_loc * u_prev) * b1_loc
+              unew(k,i,j) = u_loc
+
+              b1(i,j) = b1_loc
+              d1(i,j) = d1_loc
+           end do
+        end do
+     end do
+     call cpu_time(t2)
+     timings(idx,1) = t2 - t1
+     print '(A,F10.4," s")', " vertical->i->j elapsed:       ", timings(idx,1)
+
+     !=========================================================
+     ! 2. i -> j -> vertical
+     !    parallel over (i,j), inner serial k
+     !=========================================================
+     call reset_state(nz,nx,ny,u,unew,c1,b1,d1)
+     call cpu_time(t1)
+     do concurrent (i=1:nx, j=1:ny)
+        if (mask(i,j) <= 0.0_real64) cycle
+        do k = 2, nz-1
+           a_loc   = a3d(k,i,j)
+           h_loc   = h3d(k,i,j)
+           ray_loc = ray(i,j)
+           b1_loc  = b1(i,j)
+           d1_loc  = d1(i,j)
+
+           c1(k,i,j) = dt * a_loc * b1_loc
+
+           b_denom = h_loc + dt * (ray_loc + a_loc * d1_loc)
+           b1_loc  = one / (b_denom + dt * a3d(k+1,i,j))
+           d1_loc  = b_denom * b1_loc
+
+           u_prev  = unew(k-1,i,j)
+           u_loc   = (h_loc * u(k,i,j) + dt * a_loc * u_prev) * b1_loc
+           unew(k,i,j) = u_loc
+
+           b1(i,j) = b1_loc
+           d1(i,j) = d1_loc
+        end do
+     end do
+     call cpu_time(t2)
+     timings(idx,2) = t2 - t1
+     print '(A,F10.4," s")', " i->j->vertical elapsed:        ", timings(idx,2)
+
+     !=========================================================
+     ! 3. j -> vertical -> i
+     !    parallel over j, inner serial k, inner concurrent i
+     !=========================================================
+     call reset_state(nz,nx,ny,u,unew,c1,b1,d1)
+     call cpu_time(t1)
+     do concurrent (j=1:ny)
+        do k = 2, nz-1
+           do concurrent (i=1:nx)
+              if (mask(i,j) <= 0.0_real64) cycle
+
+              a_loc   = a3d(k,i,j)
+              h_loc   = h3d(k,i,j)
+              ray_loc = ray(i,j)
+              b1_loc  = b1(i,j)
+              d1_loc  = d1(i,j)
+
+              c1(k,i,j) = dt * a_loc * b1_loc
+
+              b_denom = h_loc + dt * (ray_loc + a_loc * d1_loc)
+              b1_loc  = one / (b_denom + dt * a3d(k+1,i,j))
+              d1_loc  = b_denom * b1_loc
+
+              u_prev  = unew(k-1,i,j)
+              u_loc   = (h_loc * u(k,i,j) + dt * a_loc * u_prev) * b1_loc
+              unew(k,i,j) = u_loc
+
+              b1(i,j) = b1_loc
+              d1(i,j) = d1_loc
+           end do
+        end do
+     end do
+     call cpu_time(t2)
+     timings(idx,3) = t2 - t1
+     print '(A,F10.4," s")', " j->vertical->i elapsed:        ", timings(idx,3)
+
+     !=========================================================
+     ! 4. vertical -> j -> i
+     !    k outer, then concurrent j, then concurrent i
+     !=========================================================
+     call reset_state(nz,nx,ny,u,unew,c1,b1,d1)
+     call cpu_time(t1)
+     do k = 2, nz-1
+        do concurrent (j=1:ny)
+           do concurrent (i=1:nx)
+              if (mask(i,j) <= 0.0_real64) cycle
+
+              a_loc   = a3d(k,i,j)
+              h_loc   = h3d(k,i,j)
+              ray_loc = ray(i,j)
+              b1_loc  = b1(i,j)
+              d1_loc  = d1(i,j)
+
+              c1(k,i,j) = dt * a_loc * b1_loc
+
+              b_denom = h_loc + dt * (ray_loc + a_loc * d1_loc)
+              b1_loc  = one / (b_denom + dt * a3d(k+1,i,j))
+              d1_loc  = b_denom * b1_loc
+
+              u_prev  = unew(k-1,i,j)
+              u_loc   = (h_loc * u(k,i,j) + dt * a_loc * u_prev) * b1_loc
+              unew(k,i,j) = u_loc
+
+              b1(i,j) = b1_loc
+              d1(i,j) = d1_loc
+           end do
+        end do
+     end do
+     call cpu_time(t2)
+     timings(idx,4) = t2 - t1
+     print '(A,F10.4," s")', " vertical->j->i elapsed:        ", timings(idx,4)
+
+     !=========================================================
+     ! 5. j -> i -> vertical
+     !    concurrent over j,i, then serial k
+     !=========================================================
+     call reset_state(nz,nx,ny,u,unew,c1,b1,d1)
+     call cpu_time(t1)
+     do concurrent (j=1:ny, i=1:nx)
+        if (mask(i,j) <= 0.0_real64) cycle
+        do k = 2, nz-1
+           a_loc   = a3d(k,i,j)
+           h_loc   = h3d(k,i,j)
+           ray_loc = ray(i,j)
+           b1_loc  = b1(i,j)
+           d1_loc  = d1(i,j)
+
+           c1(k,i,j) = dt * a_loc * b1_loc
+
+           b_denom = h_loc + dt * (ray_loc + a_loc * d1_loc)
+           b1_loc  = one / (b_denom + dt * a3d(k+1,i,j))
+           d1_loc  = b_denom * b1_loc
+
+           u_prev  = unew(k-1,i,j)
+           u_loc   = (h_loc * u(k,i,j) + dt * a_loc * u_prev) * b1_loc
+           unew(k,i,j) = u_loc
+
+           b1(i,j) = b1_loc
+           d1(i,j) = d1_loc
+        end do
+     end do
+     call cpu_time(t2)
+     timings(idx,5) = t2 - t1
+     print '(A,F10.4," s")', " j->i->vertical elapsed:        ", timings(idx,5)
+
+     !------------------------------------------
+     ! Free device and host memory
+     !------------------------------------------
+     !$omp target exit data map(delete: a3d,h3d,u,unew,c1,ray,mask,b1,d1)
+
+     deallocate(a3d,h3d,u,unew,c1,ray,mask,b1,d1)
+  end do
+
+  print *
+  print *, "===================================================="
+  print *, " Benchmark complete."
+  print *, "===================================================="
+
+  print *
+  print *, "Nz,vertical->i->j,i->j->vertical,j->vertical->i,vertical->j->i,j->i->vertical"
+  do idx = 1, ntests
+     write(*,'(I5,5(",",F12.6))') nz_values(idx), timings(idx,1), timings(idx,2), &
+                                   timings(idx,3), timings(idx,4), timings(idx,5)
+  end do
+
+contains
+
+  subroutine reset_state(nz,nx,ny,u,unew,c1,b1,d1)
+    integer, intent(in) :: nx, ny, nz
+    real(real64), intent(in)    :: u(nz,nx,ny)
+    real(real64), intent(inout) :: unew(nz,nx,ny), c1(nz,nx,ny)
+    real(real64), intent(inout) :: b1(nx,ny), d1(nx,ny)
+    integer :: ii, jj, kk
+
+    do concurrent (ii=1:nx, jj=1:ny, kk=1:nz)
+       unew(kk,ii,jj) = u(kk,ii,jj)
+       c1(kk,ii,jj)   = 0.0_real64
+       if (kk == 1) then
+          b1(ii,jj) = 0.0_real64
+          d1(ii,jj) = 0.0_real64
+       end if
+    end do
+  end subroutine reset_state
+
+end program loop_order_sweep_do_concurrent_tridiag_reuse
+
