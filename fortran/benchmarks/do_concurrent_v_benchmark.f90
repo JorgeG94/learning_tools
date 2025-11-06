@@ -10,8 +10,9 @@ program loop_order_sweep_do_concurrent_safe
   real(real64), allocatable :: B(:,:,:), Bnew(:,:,:)
   real(real64), allocatable :: C(:,:,:), Cnew(:,:,:)
   real(real64), allocatable :: D(:,:,:), Dnew(:,:,:)
+  real(real64), allocatable :: E(:,:,:), Enew(:,:,:)
   real(real64) :: coeff = 0.05_real64, t1, t2, diff
-  real(real64) :: timings(ntests,4)
+  real(real64) :: timings(ntests,5)
   real(real64) :: val
   integer :: i,j,k,nz, idx
   character(len=32) :: arg
@@ -46,21 +47,24 @@ program loop_order_sweep_do_concurrent_safe
      allocate(B(nx,ny,nz), Bnew(nx,ny,nz))
      allocate(C(nx,ny,nz), Cnew(nx,ny,nz))
      allocate(D(nx,ny,nz), Dnew(nx,ny,nz))
+     allocate(E(nx,ny,nz), Enew(nx,ny,nz))
 
      call random_number(val)
      !B = A; C = A; D = A
      !Anew = A; Bnew = B; Cnew = C; Dnew = D
-     !$omp target enter data map(alloc: A,B,C,D,Anew, Bnew, Cnew, Dnew)
+     !$omp target enter data map(alloc: A,B,C,D,E, Anew, Bnew, Cnew, Dnew, Enew)
     ! if you don't do this on the GPU it is hella slow
     do concurrent (i=1:nx, j=1:ny, k=1:nz)
      A(i,j,k) = val 
      B(i,j,k) = val 
      C(i,j,k) = val 
      D(i,j,k) = val 
+     E(i,j,k) = val 
      Anew(i,j,k) = val
      Bnew(i,j,k) = val
      Cnew(i,j,k) = val
      Dnew(i,j,k) = val
+     Enew(i,j,k) = val
     end do
 
      !---------------------------------------------------------
@@ -127,6 +131,20 @@ program loop_order_sweep_do_concurrent_safe
      timings(idx,4) = t2 - t1
      print '(A,F10.4," s")', " vertical->j->i elapsed:  ", timings(idx,4)
 
+     call cpu_time(t1) 
+     do concurrent(j=1:ny,i=1:nx,k=2:nz-1)
+        if (E(i,j,k) > 0.5d0) then
+           Enew(i,j,k) = E(i,j,k) + coeff * (E(i,j,k-1) - 2*E(i,j,k) + E(i,j,k+1))
+        else
+           Enew(i,j,k) = E(i,j,k) - coeff * (E(i,j,k-1) + E(i,j,k+1))
+        end if
+        if (Enew(i,j,k) > 1.0d0) Enew(i,j,k) = 1.0d0
+
+     end do
+     call cpu_time(t2)
+     timings(idx,5) = t2 - t1
+     print '(A,F10.4," s")', " j->i->vertical elapsed:  ", timings(idx,5)
+
      !---------------------------------------------------------
      ! ✅ Verify correctness
      diff = 0.0_real64
@@ -134,13 +152,14 @@ program loop_order_sweep_do_concurrent_safe
        diff = max(diff, abs(Anew(i,j,k) - Bnew(i,j,k)))
        diff = max(diff, abs(Anew(i,j,k) - Cnew(i,j,k)))
        diff = max(diff, abs(Anew(i,j,k) - Dnew(i,j,k)))
+       diff = max(diff, abs(Anew(i,j,k) - Enew(i,j,k)))
     end do
-     !$omp target exit data map(delete: A,B,C,D,Anew, Bnew, Cnew, Dnew)
+     !$omp target exit data map(delete: A,B,C,D,E,Anew, Bnew, Cnew, Dnew, Enew)
      !$omp target update from(diff)
 
      print '(A,E12.4)', " Max difference between methods: ", diff
 
-     deallocate(A, Anew, B, Bnew, C, Cnew, D, Dnew)
+     deallocate(A, Anew, B, Bnew, C, Cnew, D, Dnew, E, Enew)
   end do
 
   print *
@@ -151,10 +170,10 @@ program loop_order_sweep_do_concurrent_safe
   !---------------------------------------------------------
   ! 🧾 CSV summary
   print *
-  print *, "Nz,vertical->i->j,i->j->vertical,j->vertical->i,vertical->j->i"
+  print *, "Nz,vertical->i->j,i->j->vertical,j->vertical->i,vertical->j->i,j->i->k"
   do idx = 1, ntests
-     write(*,'(I5,4(",",F12.6))') nz_values(idx), timings(idx,1), timings(idx,2), &
-                                   timings(idx,3), timings(idx,4)
+     write(*,'(I5,5(",",F12.6))') nz_values(idx), timings(idx,1), timings(idx,2), &
+                                   timings(idx,3), timings(idx,4), timings(idx,5)
   end do
 
 end program loop_order_sweep_do_concurrent_safe
