@@ -3,8 +3,8 @@
   use omp_lib, only: omp_get_wtime
   implicit none
 
-  !integer, parameter :: nz_values(*) = [400]
-  integer, parameter :: nz_values(*) = [10, 25, 50, 100, 200, 400]
+  integer, parameter :: nz_values(*) = [400]
+  !integer, parameter :: nz_values(*) = [10, 25, 50, 100, 200, 400]
   integer, parameter :: ntests = size(nz_values)
 
   integer :: nx, ny, nz, narg
@@ -20,13 +20,18 @@
   real(real64),allocatable :: sum_b1(:,:), sum_d1(:,:)
   real(real64) :: d1_1, d1_2, d1_3, d1_4, d1_5
 
+  integer, parameter :: n_iters = 200
+  integer :: ii
   real(real64) :: dt, t1, t2
+  real(real64) :: total_t1, total_t2
   real(real64) :: timings(ntests,5)
   real(real64) :: flops(ntests)
   real(real64) :: val
   real(real64) :: a_loc, h_loc, ray_loc, b1_loc, d1_loc, b_denom, u_prev, u_loc
   real(real64), parameter :: one = 1.0_real64, zero = 0.0_real64
+  logical :: validate 
 
+  validate = .false.
   !----------------------------------
   ! Command-line argument parsing
   !----------------------------------
@@ -52,6 +57,7 @@
      sum_b1 = 0.0_real64
      sum_d1 = 0.0_real64
 
+  total_t1 = omp_get_wtime()
   do idx = 1, ntests
      nz = nz_values(idx)
      print *
@@ -65,7 +71,7 @@
 
      call random_number(val)
 
-     flops(idx) = real((nz - 2),real64) * real(ny,real64) * real(nx,real64) * real(15,real64)/real(1e9,real64)
+     flops(idx) = real(n_iters) * real((nz - 2),real64) * real(ny,real64) * real(nx,real64) * real(15,real64)/real(1e9,real64)
      print *, flops(idx)
 
      !------------------------------------------
@@ -104,6 +110,7 @@
      !=========================================================
      !call cpu_time(t1)
      t1 = omp_get_wtime()
+     do ii = 1, n_iters
      do k = 2, nz-1
         do concurrent (i=1:nx)
            do concurrent (j=1:ny)
@@ -135,11 +142,14 @@
            end do
         end do
      end do
+     end do
      !call cpu_time(t2)
      t2 = omp_get_wtime()
      timings(idx,1) = t2 - t1
+     if(validate) then 
      !$omp target update from(d1)
      d1_1 = d1(1,17)
+     endif
      print '(A,F10.4," s")', " vertical->i->j elapsed:       ", timings(idx,1)
      print '(A,F10.4," GFLOP/s")', " vertical->i->j flop rate:       ", flops(idx)/timings(idx,1)
 
@@ -150,6 +160,7 @@
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
      t1 = omp_get_wtime()
      !call cpu_time(t1)
+     do ii = 1, n_iters
      do concurrent (i=1:nx, j=1:ny)
         if (mask(i,j) <= 0.0_real64) cycle
         do k = 2, nz-1
@@ -173,9 +184,12 @@
            d1(i,j) = d1_loc
         end do
      end do
+     end do
      t2 = omp_get_wtime()
+     if(validate) then 
      !$omp target update from(d1)
      d1_2 = d1(1,17)
+     endif
      timings(idx,2) = t2 - t1
      print '(A,F10.4," s")', " i->j->vertical elapsed:        ", timings(idx,2)
      print '(A,F10.4," GFLOP/s")', " i->j->vertical flop rate:        ", flops(idx)/timings(idx,2)
@@ -186,6 +200,7 @@
      !=========================================================
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
      t1 = omp_get_wtime()
+     do ii = 1, n_iters
      do concurrent (j=1:ny)
         do k = 2, nz-1
            do concurrent (i=1:nx)
@@ -212,9 +227,12 @@
            end do
         end do
      end do
+     end do
      t2 = omp_get_wtime()
+     if(validate) then 
      !$omp target update from(d1)
      d1_3 = d1(1,17)
+     endif
      timings(idx,3) = t2 - t1
      print '(A,F10.4," s")', " j->vertical->i elapsed:        ", timings(idx,3)
      print '(A,F10.4," GFLOP/s")', " j->vertical->i flop rate:        ", flops(idx)/timings(idx,3)
@@ -225,6 +243,7 @@
      !=========================================================
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
      t1 = omp_get_wtime()
+     do ii = 1, n_iters
      do k = 2, nz-1
         do concurrent (j=1:ny)
            do concurrent (i=1:nx)
@@ -251,9 +270,12 @@
            end do
         end do
      end do
+     end do
      t2 = omp_get_wtime()
+     if(validate) then 
      !$omp target update from(d1)
      d1_4 = d1(1,17)
+     endif
      timings(idx,4) = t2 - t1
      print '(A,F10.4," s")', " vertical->j->i elapsed:        ", timings(idx,4)
      print '(A,F10.4," GFLOP/s")', " vertical->j->i flop rate:        ", flops(idx)/timings(idx,4)
@@ -264,6 +286,7 @@
      !=========================================================
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
      t1 = omp_get_wtime()
+     do ii = 1, n_iters
      do concurrent (j=1:ny, i=1:nx)
         if (mask(i,j) <= 0.0_real64) cycle
         do k = 2, nz-1
@@ -287,9 +310,12 @@
            d1(i,j) = d1_loc
         end do
      end do
+     end do
      t2 = omp_get_wtime()
+     if(validate) then 
      !$omp target update from(d1)
      d1_5 = d1(1,17)
+     endif
      timings(idx,5) = t2 - t1
      print '(A,F10.4," s")', " j->i->vertical elapsed:        ", timings(idx,5)
      print '(A,F10.4," GFLOP/s")', " j->i->vertical flop rate:        ", flops(idx)/timings(idx,5)
@@ -302,12 +328,18 @@
      deallocate(a3d,h3d,u,unew,c1,ray,mask,b1,d1)
   end do
 
+  total_t2 = omp_get_wtime()
 
+  print '(A , F10.4, " s")', "Total time elapsed: ", total_t2 - total_t1
+
+
+  if(validate) then 
   sum_d1(1,1) = d1_1
   sum_d1(1,2) = d1_2
   sum_d1(1,3) = d1_3
   sum_d1(1,4) = d1_4
   sum_d1(1,5) = d1_5
+  endif
 
   print *
   print *, "===================================================="
@@ -321,6 +353,7 @@
                                    timings(idx,3), timings(idx,4), timings(idx,5)
   end do
 ! Compact validation
+if(validate) then 
 block
 ! Validate that all loop orderings give the same results
 logical :: b1_valid, d1_valid
@@ -359,6 +392,9 @@ else
 end if
 print *, "===================================================="
 end block
+else
+print *, "You are confident in your resulst, we didn't check for correctness, just S P E E D"
+endif
 contains
 
   subroutine reset_state(nx,ny,nz,u,unew,c1,b1,d1)
