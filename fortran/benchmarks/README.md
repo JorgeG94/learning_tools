@@ -41,6 +41,8 @@ benchmarks are:
   - Here it is interesting to run the code with `ACC_NUM_CORES=1`, this replicates serial dododo performance 
 - gpu do concurrent with openmp memory management 
 
+How to select ACC device or not: `export ACC_DEVICE_TYPE=nvidia/host`
+
 Here are some benchmark results with 1024
 ```
 ! serial, triple nested do
