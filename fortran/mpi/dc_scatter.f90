@@ -111,7 +111,7 @@ program mpi_saxpy_3d_host
   do concurrent (k = 1:nk_local, j = 1:dims, i = 1:dims) reduce(+:local_sum)
      local_sum = local_sum + c(i,j,k)
   end do
-  !$omp update from(local_sum)
+  !$omp target update from(local_sum)
 
   call MPI_Reduce(local_sum, global_sum, 1, MPI_REAL8, MPI_SUM, 0, MPI_COMM_WORLD, ierr)
 
