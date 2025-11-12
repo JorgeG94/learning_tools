@@ -112,6 +112,7 @@ program mpi_saxpy_3d_host
      local_sum = local_sum + c(i,j,k)
   end do
   !$omp target update from(local_sum)
+  !$omp target exit data map(delete:b,c)
 
   call MPI_Reduce(local_sum, global_sum, 1, MPI_REAL8, MPI_SUM, 0, MPI_COMM_WORLD, ierr)
 
