@@ -6,6 +6,7 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
   integer, parameter :: ntests = size(nz_values)
 
   integer :: nx, ny, nz, narg
+  integer :: niters, ii
   integer :: i, j, k, idx
   character(len=32) :: arg
 
@@ -28,6 +29,7 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
   narg = command_argument_count()
   nx = 256
   ny = 256
+  niters = 10
   if (narg >= 1) then
      call get_command_argument(1, arg)
      read(arg, *) nx
@@ -35,6 +37,10 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
   if (narg >= 2) then
      call get_command_argument(2, arg)
      read(arg, *) ny
+  end if
+  if(narg >= 3) then 
+    call get_command_argument(3, arg)
+    read(arg, *) niters
   end if
 
   dt = 0.01_real64
@@ -48,7 +54,7 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
      nz = nz_values(idx)
      print *
      print '(A,I5)', ">>> Testing Nz = ", nz
-     print *, "---------------------------------------------"
+     !print *, "---------------------------------------------"
 
      ! Allocate fields
      allocate(a3d(nx,ny,nz), h3d(nx,ny,nz))
@@ -93,10 +99,9 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
      !=========================================================
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
      call cpu_time(t1)
+     do ii = 1, niters
      do k = 2, nz-1
-        do concurrent (j=1:ny)
-           do concurrent (i=1:nx)
-              if (mask(i,j) <= 0.0_real64) cycle
+      do concurrent(j=1:ny, i=1:nx, mask(i,j) >= 0.0_real64)
 
               a_loc   = a3d(i,j,k)
               h_loc   = h3d(i,j,k)
@@ -116,12 +121,12 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
 
               b1(i,j) = b1_loc
               d1(i,j) = d1_loc
-           end do
         end do
+     end do
      end do
      call cpu_time(t2)
      timings(idx,1) = t2 - t1
-     print '(A,F10.4," s")', " vertical->i->j elapsed:       ", timings(idx,1)
+     !print '(A,F10.4," s")', " vertical->i->j elapsed:       ", timings(idx,1)
 
      !=========================================================
      ! 2. i -> j -> vertical
@@ -129,8 +134,8 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
      !=========================================================
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
      call cpu_time(t1)
-     do concurrent (i=1:nx, j=1:ny)
-        if (mask(i,j) <= 0.0_real64) cycle
+     do ii = 1, niters
+     do concurrent (i=1:nx, j=1:ny, mask(i,j) >= 0.0_real64)
         do k = 2, nz-1
            a_loc   = a3d(i,j,k)
            h_loc   = h3d(i,j,k)
@@ -152,9 +157,10 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
            d1(i,j) = d1_loc
         end do
      end do
+     end do
      call cpu_time(t2)
      timings(idx,2) = t2 - t1
-     print '(A,F10.4," s")', " i->j->vertical elapsed:        ", timings(idx,2)
+     !print '(A,F10.4," s")', " i->j->vertical elapsed:        ", timings(idx,2)
 
      !=========================================================
      ! 3. j -> vertical -> i
@@ -162,10 +168,10 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
      !=========================================================
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
      call cpu_time(t1)
+     do ii = 1, niters
      do concurrent (j=1:ny)
         do k = 2, nz-1
-           do concurrent (i=1:nx)
-              if (mask(i,j) <= 0.0_real64) cycle
+           do concurrent (i=1:nx, mask(i,j) >= 0.0_real64)
 
               a_loc   = a3d(i,j,k)
               h_loc   = h3d(i,j,k)
@@ -188,9 +194,10 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
            end do
         end do
      end do
+     end do
      call cpu_time(t2)
      timings(idx,3) = t2 - t1
-     print '(A,F10.4," s")', " j->vertical->i elapsed:        ", timings(idx,3)
+     !print '(A,F10.4," s")', " j->vertical->i elapsed:        ", timings(idx,3)
 
      !=========================================================
      ! 4. vertical -> j -> i
@@ -198,10 +205,9 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
      !=========================================================
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
      call cpu_time(t1)
+     do ii = 1, niters
      do k = 2, nz-1
-        do concurrent (j=1:ny)
-           do concurrent (i=1:nx)
-              if (mask(i,j) <= 0.0_real64) cycle
+      do concurrent(j=1:ny, i=1:nx, mask(i,j) >= 0.0_real64)
 
               a_loc   = a3d(i,j,k)
               h_loc   = h3d(i,j,k)
@@ -221,12 +227,12 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
 
               b1(i,j) = b1_loc
               d1(i,j) = d1_loc
-           end do
         end do
+     end do
      end do
      call cpu_time(t2)
      timings(idx,4) = t2 - t1
-     print '(A,F10.4," s")', " vertical->j->i elapsed:        ", timings(idx,4)
+     !print '(A,F10.4," s")', " vertical->j->i elapsed:        ", timings(idx,4)
 
      !=========================================================
      ! 5. j -> i -> vertical
@@ -234,8 +240,8 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
      !=========================================================
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
      call cpu_time(t1)
-     do concurrent (j=1:ny, i=1:nx)
-        if (mask(i,j) <= 0.0_real64) cycle
+     do ii = 1, niters
+     do concurrent (j=1:ny, i=1:nx, mask(i,j) >= 0.0_real64)
         do k = 2, nz-1
            a_loc   = a3d(i,j,k)
            h_loc   = h3d(i,j,k)
@@ -257,9 +263,10 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
            d1(i,j) = d1_loc
         end do
      end do
+     end do
      call cpu_time(t2)
      timings(idx,5) = t2 - t1
-     print '(A,F10.4," s")', " j->i->vertical elapsed:        ", timings(idx,5)
+     !print '(A,F10.4," s")', " j->i->vertical elapsed:        ", timings(idx,5)
 
      !------------------------------------------
      ! Free device and host memory
@@ -275,7 +282,7 @@ program loop_order_sweep_do_concurrent_tridiag_reuse
   print *, "===================================================="
 
   print *
-  print *, "Nz,vertical->i->j,i->j->vertical,j->vertical->i,vertical->j->i,j->i->vertical"
+  print *, "Nz,k->i->j,i->j->k,j->k->i,k->j->i,j->i->k"
   do idx = 1, ntests
      write(*,'(I5,5(",",F12.6))') nz_values(idx), timings(idx,1), timings(idx,2), &
                                    timings(idx,3), timings(idx,4), timings(idx,5)
