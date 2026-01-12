@@ -94,6 +94,7 @@ for m_idx, method in enumerate(methods):
     ax.set_xlabel("Nz")
     ax.set_ylabel("Time (s)")
     ax.grid(axis="y", linestyle="--", alpha=0.7)
+    #ax.set_ylim(0, 0.1)
 
 # Hide any unused subplots (since we have 5 methods but 6 axes)
 for idx in range(nmethods, nrows * ncols):
@@ -105,5 +106,6 @@ fig.legend(handles, labels, loc="upper center", ncol=ngpu)
 
 fig.suptitle("GPU Performance Comparison per Loop Ordering", y=0.98)
 plt.tight_layout(rect=[0, 0, 1, 0.95])
-plt.show()
+#plt.show()
+plt.savefig('old_gpu_performance_comparison.png', dpi=300, bbox_inches='tight')
 
