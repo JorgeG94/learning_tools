@@ -10,8 +10,11 @@ GRID ?= 500
 NITER ?= 1000
 YIELDSTEP ?= 100
 
+# MPI compiler
+MPICC = mpicc
+
 # Targets
-all: sw_transfer sw_resident sw_yieldstep sw_verbose sw_verbose_f90 sw_cfl sw_cfl2 sw_cfl2_f90 sw_async test_async test_async_cuda
+all: sw_transfer sw_resident sw_yieldstep sw_verbose sw_verbose_f90 sw_cfl sw_cfl2 sw_cfl2_f90 sw_cfl2_mpi sw_async test_async test_async_cuda
 
 sw_transfer: sw_transfer.c
 	$(CC) $(CFLAGS) -o sw_transfer sw_transfer.c
@@ -48,6 +51,9 @@ sw_cfl2: sw_cfl2.c
 
 sw_cfl2_f90: sw_cfl2.f90
 	$(FC) $(FFLAGS) -o sw_cfl2_f90 sw_cfl2.f90
+
+sw_cfl2_mpi: sw_cfl2_mpi.c
+	$(MPICC) -mp=gpu -O3 -o sw_cfl2_mpi sw_cfl2_mpi.c
 
 # Quick test of async behavior
 test-async: test_async
@@ -128,6 +134,21 @@ run-cfl2: sw_cfl2
 run-cfl2-f90: sw_cfl2_f90
 	OMP_TARGET_OFFLOAD=mandatory ./sw_cfl2_f90 $(GRID) $(NITER) $(DOMAIN_KM) $(DEPTH_M)
 
+# MPI version (set NPROCS for number of ranks)
+NPROCS ?= 2
+GATHER ?= 0
+
+run-cfl2-mpi: sw_cfl2_mpi
+	OMP_TARGET_OFFLOAD=mandatory mpirun -np $(NPROCS) ./sw_cfl2_mpi $(GRID) $(NITER) $(YIELDSTEP) $(GATHER) $(DOMAIN_KM) $(DEPTH_M)
+
+# Compare distributed vs gather modes
+compare-io-modes: sw_cfl2_mpi
+	@echo "=== DISTRIBUTED I/O (scalable) ==="
+	OMP_TARGET_OFFLOAD=mandatory mpirun -np $(NPROCS) ./sw_cfl2_mpi $(GRID) $(NITER) $(YIELDSTEP) 0 $(DOMAIN_KM) $(DEPTH_M)
+	@echo ""
+	@echo "=== GATHER I/O (rank 0) ==="
+	OMP_TARGET_OFFLOAD=mandatory mpirun -np $(NPROCS) ./sw_cfl2_mpi $(GRID) $(NITER) $(YIELDSTEP) 1 $(DOMAIN_KM) $(DEPTH_M)
+
 # Compare first vs second order
 compare-order: sw_cfl sw_cfl2
 	@echo "=== FIRST ORDER ==="
@@ -174,7 +195,7 @@ compare: sw_transfer sw_resident sw_yieldstep sw_verbose
 	OMP_TARGET_OFFLOAD=mandatory ./sw_verbose $(GRID) $(NITER) $(YIELDSTEP)
 
 clean:
-	rm -f sw_transfer sw_resident sw_yieldstep sw_verbose sw_async test_async test_async_cuda sw_cuda_async sw_mini sw_verbose_f90 sw_cfl sw_cfl2 sw_cfl2_f90 *.mod
+	rm -f sw_transfer sw_resident sw_yieldstep sw_verbose sw_async test_async test_async_cuda sw_cuda_async sw_mini sw_verbose_f90 sw_cfl sw_cfl2 sw_cfl2_f90 sw_cfl2_mpi *.mod
 
 .PHONY: all clean compare compare-async compare-c-fortran \
 	run-transfer-cpu run-transfer-gpu \

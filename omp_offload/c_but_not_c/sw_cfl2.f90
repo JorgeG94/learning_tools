@@ -95,6 +95,7 @@ program sw_cfl2
     real(dp) :: initial_height, domain_length
     real(dp) :: mb_per_array, mb_per_edge, output_mb
     character(len=32) :: arg
+    real(dp) :: target_days 
 
     ! Parse command line arguments
     nargs = command_argument_count()
@@ -113,6 +114,7 @@ program sw_cfl2
     call get_command_argument(1, arg)
     read(arg, *) grid_size
 
+    target_days = 7.0
     niter = 1000
     yieldstep = 100
     domain_length = 100.0d3  ! 100 km default
@@ -142,7 +144,7 @@ program sw_cfl2
     end if
 
     n = 2 * (grid_size - 1) * (grid_size - 1)
-    target_time = 2.0d0 * 24.0d0 * 3600.0d0  ! 2 days
+    target_time = target_days * 24.0d0 * 3600.0d0  ! 2 days
 
     print '(A)', '============================================================'
     print '(A)', '  SHALLOW WATER CFL TIMING - SECOND ORDER'
@@ -272,7 +274,7 @@ program sw_cfl2
     print '(A)', ''
 
     print '(A)', '============================================================'
-    print '(A)', '  2-DAY SIMULATION ESTIMATE'
+    print '(A)', '  7-DAY SIMULATION ESTIMATE'
     print '(A)', '============================================================'
     print '(A)', ''
     print '(A,ES14.4)', '  Estimated steps:  ', estimated_steps
