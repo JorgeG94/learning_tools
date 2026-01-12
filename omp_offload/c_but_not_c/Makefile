@@ -14,7 +14,7 @@ YIELDSTEP ?= 100
 MPICC = mpicc
 
 # Targets
-all: sw_transfer sw_resident sw_yieldstep sw_verbose sw_verbose_f90 sw_cfl sw_cfl2 sw_cfl2_f90 sw_cfl2_mpi sw_async test_async test_async_cuda
+all: sw_transfer sw_resident sw_yieldstep sw_verbose sw_verbose_f90 sw_cfl sw_cfl2 sw_cfl2_f90 sw_cfl2_mpi sw_cfl2_mpi_nonblocking sw_async test_async test_async_cuda
 
 sw_transfer: sw_transfer.c
 	$(CC) $(CFLAGS) -o sw_transfer sw_transfer.c
@@ -54,6 +54,9 @@ sw_cfl2_f90: sw_cfl2.f90
 
 sw_cfl2_mpi: sw_cfl2_mpi.c
 	$(MPICC) -mp=gpu -O3 -o sw_cfl2_mpi sw_cfl2_mpi.c
+
+sw_cfl2_mpi_nonblocking: sw_cfl2_mpi_nonblocking.c
+	$(MPICC) -mp=gpu -O3 -o sw_cfl2_mpi_nonblocking sw_cfl2_mpi_nonblocking.c
 
 # Quick test of async behavior
 test-async: test_async
@@ -141,6 +144,17 @@ GATHER ?= 0
 run-cfl2-mpi: sw_cfl2_mpi
 	OMP_TARGET_OFFLOAD=mandatory mpirun -np $(NPROCS) ./sw_cfl2_mpi $(GRID) $(NITER) $(YIELDSTEP) $(GATHER) $(DOMAIN_KM) $(DEPTH_M)
 
+run-cfl2-mpi-nonblocking: sw_cfl2_mpi_nonblocking
+	OMP_TARGET_OFFLOAD=mandatory mpirun -np $(NPROCS) ./sw_cfl2_mpi_nonblocking $(GRID) $(NITER) $(YIELDSTEP) $(GATHER) $(DOMAIN_KM) $(DEPTH_M)
+
+# Compare blocking vs non-blocking MPI
+compare-mpi-blocking: sw_cfl2_mpi sw_cfl2_mpi_nonblocking
+	@echo "=== BLOCKING MPI ==="
+	OMP_TARGET_OFFLOAD=mandatory mpirun -np $(NPROCS) ./sw_cfl2_mpi $(GRID) $(NITER) $(YIELDSTEP) $(GATHER) $(DOMAIN_KM) $(DEPTH_M)
+	@echo ""
+	@echo "=== NON-BLOCKING MPI (overlapped) ==="
+	OMP_TARGET_OFFLOAD=mandatory mpirun -np $(NPROCS) ./sw_cfl2_mpi_nonblocking $(GRID) $(NITER) $(YIELDSTEP) $(GATHER) $(DOMAIN_KM) $(DEPTH_M)
+
 # Compare distributed vs gather modes
 compare-io-modes: sw_cfl2_mpi
 	@echo "=== DISTRIBUTED I/O (scalable) ==="
@@ -195,12 +209,13 @@ compare: sw_transfer sw_resident sw_yieldstep sw_verbose
 	OMP_TARGET_OFFLOAD=mandatory ./sw_verbose $(GRID) $(NITER) $(YIELDSTEP)
 
 clean:
-	rm -f sw_transfer sw_resident sw_yieldstep sw_verbose sw_async test_async test_async_cuda sw_cuda_async sw_mini sw_verbose_f90 sw_cfl sw_cfl2 sw_cfl2_f90 sw_cfl2_mpi *.mod
+	rm -f sw_transfer sw_resident sw_yieldstep sw_verbose sw_async test_async test_async_cuda sw_cuda_async sw_mini sw_verbose_f90 sw_cfl sw_cfl2 sw_cfl2_f90 sw_cfl2_mpi sw_cfl2_mpi_nonblocking *.mod
 
-.PHONY: all clean compare compare-async compare-c-fortran \
+.PHONY: all clean compare compare-async compare-c-fortran compare-mpi-blocking \
 	run-transfer-cpu run-transfer-gpu \
 	run-resident-cpu run-resident-gpu \
 	run-yieldstep-cpu run-yieldstep-gpu \
 	run-verbose-cpu run-verbose-gpu \
 	run-verbose-f90-cpu run-verbose-f90-gpu \
-	run-async-sync run-async-async
+	run-async-sync run-async-async \
+	run-cfl2-mpi run-cfl2-mpi-nonblocking

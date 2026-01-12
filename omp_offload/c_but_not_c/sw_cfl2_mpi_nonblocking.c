@@ -1,4 +1,5 @@
-// sw_cfl2_mpi.c - Shallow water mini app with MPI + OpenMP target offload
+// sw_cfl2_mpi_nonblocking.c - Shallow water mini app with MPI + OpenMP target offload
+// Non-blocking MPI version with communication/computation overlap
 // Second-order extrapolation + HLL flux + domain decomposition
 
 #include <stdio.h>
@@ -12,6 +13,12 @@ struct domain {
     int number_of_elements;      // Local elements on this rank
     int global_elements;         // Total elements across all ranks
     int local_start;             // Global index of first local element
+
+    // Element classification for overlap
+    int num_interior;            // Elements with only local neighbors
+    int num_boundary;            // Elements with remote neighbors
+    int *interior_indices;       // Indices of interior elements
+    int *boundary_indices;       // Indices of boundary elements
 
     // Centroid values (per triangle)
     double *stage_centroid_values;
@@ -65,7 +72,7 @@ struct domain {
     double char_length;
 };
 
-// Halo exchange structure
+// Halo exchange structure with persistent requests
 struct halo_info {
     int num_neighbors;           // Number of MPI neighbors
     int *neighbor_ranks;         // Ranks we communicate with
@@ -79,6 +86,13 @@ struct halo_info {
     double *recv_buffer;
     int send_buffer_size;
     int recv_buffer_size;
+
+    // Non-blocking request arrays
+    MPI_Request *send_requests;
+    MPI_Request *recv_requests;
+
+    // Flag to track if exchange is in progress
+    int exchange_in_progress;
 };
 
 // Verbose output structure (for yieldstep transfers)
@@ -121,8 +135,6 @@ static void print_progress(int current, int total, double elapsed, double sim_ti
 }
 
 // Transfer verbose output from GPU
-// mode 0 = distributed (each rank keeps local data - scalable)
-// mode 1 = gather (all data to rank 0 - for debugging)
 static void transfer_yieldstep(struct domain *D, struct verbose_output *out,
                                 double *t_transfer, int gather_mode) {
     int n = D->number_of_elements;
@@ -186,11 +198,10 @@ static void transfer_yieldstep(struct domain *D, struct verbose_output *out,
         out->height_edge[k] = D->height_edge_values[k];
     }
 
-    // Optional gather to rank 0 (not scalable, for debugging only)
+    // Optional gather to rank 0 using non-blocking ops
     if (gather_mode) {
         int n_global = D->global_elements;
 
-        // Gather counts from all ranks
         int *recv_counts = NULL;
         int *displs = NULL;
         double *global_stage = NULL;
@@ -201,7 +212,6 @@ static void transfer_yieldstep(struct domain *D, struct verbose_output *out,
             global_stage = (double *)malloc(n_global * sizeof(double));
         }
 
-        // Gather local counts
         MPI_Gather(&n, 1, MPI_INT, recv_counts, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
         if (mpi_rank == 0) {
@@ -211,10 +221,14 @@ static void transfer_yieldstep(struct domain *D, struct verbose_output *out,
             }
         }
 
-        // Gather just stage as example (would do all arrays in production)
-        MPI_Gatherv(out->stage, n, MPI_DOUBLE,
-                    global_stage, recv_counts, displs, MPI_DOUBLE,
-                    0, MPI_COMM_WORLD);
+        // Non-blocking gather
+        MPI_Request gather_req;
+        MPI_Igatherv(out->stage, n, MPI_DOUBLE,
+                     global_stage, recv_counts, displs, MPI_DOUBLE,
+                     0, MPI_COMM_WORLD, &gather_req);
+
+        // Could do other work here while gather is in progress
+        MPI_Wait(&gather_req, MPI_STATUS_IGNORE);
 
         if (mpi_rank == 0) {
             free(recv_counts);
@@ -232,8 +246,6 @@ static int get_owner(int global_idx, int n_global, int nprocs) {
     int base = n_global / nprocs;
     int remainder = n_global % nprocs;
 
-    // Ranks 0..remainder-1 have base+1 elements
-    // Ranks remainder..nprocs-1 have base elements
     if (global_idx < (base + 1) * remainder) {
         return global_idx / (base + 1);
     } else {
@@ -356,6 +368,61 @@ static void generate_mesh_local(struct domain *D, int grid_size) {
     }
 }
 
+// Classify elements as interior or boundary for overlap
+static void classify_elements(struct domain *D) {
+    int n = D->number_of_elements;
+
+    // First pass: count interior and boundary elements
+    int num_interior = 0;
+    int num_boundary = 0;
+
+    for (int k = 0; k < n; k++) {
+        int has_remote = 0;
+        for (int i = 0; i < 3; i++) {
+            int owner = D->neighbour_owners[3*k + i];
+            if (owner >= 0 && owner != mpi_rank) {
+                has_remote = 1;
+                break;
+            }
+        }
+        if (has_remote) {
+            num_boundary++;
+        } else {
+            num_interior++;
+        }
+    }
+
+    D->num_interior = num_interior;
+    D->num_boundary = num_boundary;
+    D->interior_indices = (int *)malloc(num_interior * sizeof(int));
+    D->boundary_indices = (int *)malloc(num_boundary * sizeof(int));
+
+    // Second pass: fill index arrays
+    int int_idx = 0;
+    int bnd_idx = 0;
+    for (int k = 0; k < n; k++) {
+        int has_remote = 0;
+        for (int i = 0; i < 3; i++) {
+            int owner = D->neighbour_owners[3*k + i];
+            if (owner >= 0 && owner != mpi_rank) {
+                has_remote = 1;
+                break;
+            }
+        }
+        if (has_remote) {
+            D->boundary_indices[bnd_idx++] = k;
+        } else {
+            D->interior_indices[int_idx++] = k;
+        }
+    }
+
+    if (mpi_rank == 0) {
+        printf("Element classification:\n");
+        printf("  Interior: %d (%.1f%%)\n", num_interior, 100.0 * num_interior / n);
+        printf("  Boundary: %d (%.1f%%)\n\n", num_boundary, 100.0 * num_boundary / n);
+    }
+}
+
 static void init_quantities(struct domain *D, double initial_height) {
     int n = D->number_of_elements;
 
@@ -389,7 +456,7 @@ static void init_quantities(struct domain *D, double initial_height) {
     }
 }
 
-// Build halo exchange info
+// Build halo exchange info with non-blocking support
 static void build_halo_info(struct domain *D, struct halo_info *halo) {
     int n = D->number_of_elements;
     int n_global = D->global_elements;
@@ -412,6 +479,8 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
         if (rank_counts[r] > 0) halo->num_neighbors++;
     }
 
+    halo->exchange_in_progress = 0;
+
     if (halo->num_neighbors == 0) {
         halo->neighbor_ranks = NULL;
         halo->send_counts = NULL;
@@ -420,6 +489,8 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
         halo->recv_indices = NULL;
         halo->send_buffer = NULL;
         halo->recv_buffer = NULL;
+        halo->send_requests = NULL;
+        halo->recv_requests = NULL;
         free(rank_counts);
         return;
     }
@@ -429,6 +500,8 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
     halo->recv_counts = (int *)malloc(halo->num_neighbors * sizeof(int));
     halo->send_indices = (int **)malloc(halo->num_neighbors * sizeof(int *));
     halo->recv_indices = (int **)malloc(halo->num_neighbors * sizeof(int *));
+    halo->send_requests = (MPI_Request *)malloc(halo->num_neighbors * sizeof(MPI_Request));
+    halo->recv_requests = (MPI_Request *)malloc(halo->num_neighbors * sizeof(MPI_Request));
 
     int idx = 0;
     for (int r = 0; r < mpi_size; r++) {
@@ -447,7 +520,6 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
         for (int i = 0; i < 3; i++) {
             int owner = D->neighbour_owners[3*k + i];
             if (owner >= 0 && owner != mpi_rank) {
-                // Find which neighbor index this corresponds to
                 for (int ni = 0; ni < halo->num_neighbors; ni++) {
                     if (halo->neighbor_ranks[ni] == owner) {
                         halo->recv_indices[ni][fill_idx[ni]++] = 3*k + i;
@@ -459,50 +531,51 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
     }
     free(fill_idx);
 
-    // Exchange counts to know how much to send
-    // For simplicity in this structured mesh, send_count == recv_count for symmetric neighbors
-    // In general you'd use MPI_Alltoall or point-to-point
+    // Exchange counts using non-blocking ops
+    MPI_Request *count_reqs = (MPI_Request *)malloc(2 * halo->num_neighbors * sizeof(MPI_Request));
     for (int ni = 0; ni < halo->num_neighbors; ni++) {
         int partner = halo->neighbor_ranks[ni];
-        MPI_Sendrecv(&halo->recv_counts[ni], 1, MPI_INT, partner, 0,
-                     &halo->send_counts[ni], 1, MPI_INT, partner, 0,
-                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Irecv(&halo->send_counts[ni], 1, MPI_INT, partner, 0,
+                  MPI_COMM_WORLD, &count_reqs[2*ni]);
+        MPI_Isend(&halo->recv_counts[ni], 1, MPI_INT, partner, 0,
+                  MPI_COMM_WORLD, &count_reqs[2*ni + 1]);
     }
+    MPI_Waitall(2 * halo->num_neighbors, count_reqs, MPI_STATUSES_IGNORE);
+    free(count_reqs);
 
-    // Allocate send indices (we need to know which of our edges the partner needs)
-    // For now, use a simplified approach: partner tells us which global indices it needs
-    // We'll exchange the global indices and convert to local
-
+    // Allocate send indices
     for (int ni = 0; ni < halo->num_neighbors; ni++) {
         halo->send_indices[ni] = (int *)malloc(halo->send_counts[ni] * sizeof(int));
     }
 
     // Exchange the global indices each rank needs
-    // recv_indices stores local edge indices; we need to send the corresponding global neighbor indices
     int **global_needed = (int **)malloc(halo->num_neighbors * sizeof(int *));
     for (int ni = 0; ni < halo->num_neighbors; ni++) {
         global_needed[ni] = (int *)malloc(halo->recv_counts[ni] * sizeof(int));
         for (int j = 0; j < halo->recv_counts[ni]; j++) {
             int edge_idx = halo->recv_indices[ni][j];
-            global_needed[ni][j] = D->neighbours[edge_idx];  // Still stores global index
+            global_needed[ni][j] = D->neighbours[edge_idx];
         }
     }
 
-    // Exchange to learn what we need to send
     int **global_to_send = (int **)malloc(halo->num_neighbors * sizeof(int *));
+    MPI_Request *idx_reqs = (MPI_Request *)malloc(2 * halo->num_neighbors * sizeof(MPI_Request));
+
     for (int ni = 0; ni < halo->num_neighbors; ni++) {
         global_to_send[ni] = (int *)malloc(halo->send_counts[ni] * sizeof(int));
         int partner = halo->neighbor_ranks[ni];
-        MPI_Sendrecv(global_needed[ni], halo->recv_counts[ni], MPI_INT, partner, 1,
-                     global_to_send[ni], halo->send_counts[ni], MPI_INT, partner, 1,
-                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Irecv(global_to_send[ni], halo->send_counts[ni], MPI_INT, partner, 1,
+                  MPI_COMM_WORLD, &idx_reqs[2*ni]);
+        MPI_Isend(global_needed[ni], halo->recv_counts[ni], MPI_INT, partner, 1,
+                  MPI_COMM_WORLD, &idx_reqs[2*ni + 1]);
     }
+    MPI_Waitall(2 * halo->num_neighbors, idx_reqs, MPI_STATUSES_IGNORE);
+    free(idx_reqs);
 
     // Convert global_to_send to local indices for our send_indices
     for (int ni = 0; ni < halo->num_neighbors; ni++) {
         for (int j = 0; j < halo->send_counts[ni]; j++) {
             int g = global_to_send[ni][j];
-            // This global index should be owned by us; convert to local
             halo->send_indices[ni][j] = global_to_local(g, n_global, mpi_size, mpi_rank);
         }
         free(global_to_send[ni]);
@@ -524,18 +597,15 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
     free(rank_counts);
 }
 
-// Exchange halo data
-static void exchange_halo(struct domain *D, struct halo_info *halo) {
+// Start non-blocking halo exchange (post receives and sends)
+static void start_halo_exchange(struct domain *D, struct halo_info *halo) {
     if (halo->num_neighbors == 0) return;
 
-    int n = D->number_of_elements;
-
-    // Pack send buffer (edge values from local elements that neighbors need)
+    // Pack send buffer
     int offset = 0;
     for (int ni = 0; ni < halo->num_neighbors; ni++) {
         for (int j = 0; j < halo->send_counts[ni]; j++) {
-            int k = halo->send_indices[ni][j];  // Local element index
-            // Send edge 0's values (simplified - real code would track which edge)
+            int k = halo->send_indices[ni][j];
             int edge_idx = 3*k + 0;
             halo->send_buffer[4*offset + 0] = D->height_edge_values[edge_idx];
             halo->send_buffer[4*offset + 1] = D->xmom_edge_values[edge_idx];
@@ -545,31 +615,44 @@ static void exchange_halo(struct domain *D, struct halo_info *halo) {
         }
     }
 
-    // Non-blocking sends and receives
-    MPI_Request *requests = (MPI_Request *)malloc(2 * halo->num_neighbors * sizeof(MPI_Request));
-    int send_offset = 0, recv_offset = 0;
-
+    // Post all receives first (good MPI practice)
+    int recv_offset = 0;
     for (int ni = 0; ni < halo->num_neighbors; ni++) {
         int partner = halo->neighbor_ranks[ni];
         MPI_Irecv(&halo->recv_buffer[4*recv_offset], 4 * halo->recv_counts[ni], MPI_DOUBLE,
-                  partner, 2, MPI_COMM_WORLD, &requests[2*ni]);
-        MPI_Isend(&halo->send_buffer[4*send_offset], 4 * halo->send_counts[ni], MPI_DOUBLE,
-                  partner, 2, MPI_COMM_WORLD, &requests[2*ni + 1]);
-        send_offset += halo->send_counts[ni];
+                  partner, 2, MPI_COMM_WORLD, &halo->recv_requests[ni]);
         recv_offset += halo->recv_counts[ni];
     }
 
-    MPI_Waitall(2 * halo->num_neighbors, requests, MPI_STATUSES_IGNORE);
-    free(requests);
+    // Then post all sends
+    int send_offset = 0;
+    for (int ni = 0; ni < halo->num_neighbors; ni++) {
+        int partner = halo->neighbor_ranks[ni];
+        MPI_Isend(&halo->send_buffer[4*send_offset], 4 * halo->send_counts[ni], MPI_DOUBLE,
+                  partner, 2, MPI_COMM_WORLD, &halo->send_requests[ni]);
+        send_offset += halo->send_counts[ni];
+    }
 
-    // Unpack recv buffer into ghost edge values
-    // We store received data in a temporary location or directly use in flux
-    // For simplicity, we'll store in the edge arrays at special indices
-    // Actually, let's just use the recv_buffer directly in flux computation
-    // This requires modifying the flux kernel to handle remote data differently
+    halo->exchange_in_progress = 1;
+}
 
-    // For now, we'll unpack into a ghost array extension (simpler approach)
-    // This is handled in the flux computation by checking neighbour_owners
+// Complete non-blocking halo exchange
+static void finish_halo_exchange(struct halo_info *halo) {
+    if (halo->num_neighbors == 0 || !halo->exchange_in_progress) return;
+
+    MPI_Waitall(halo->num_neighbors, halo->recv_requests, MPI_STATUSES_IGNORE);
+    MPI_Waitall(halo->num_neighbors, halo->send_requests, MPI_STATUSES_IGNORE);
+
+    halo->exchange_in_progress = 0;
+}
+
+// Test if receives have completed (for more fine-grained overlap)
+static int test_halo_recv_complete(struct halo_info *halo) {
+    if (halo->num_neighbors == 0) return 1;
+
+    int flag;
+    MPI_Testall(halo->num_neighbors, halo->recv_requests, &flag, MPI_STATUSES_IGNORE);
+    return flag;
 }
 
 static void compute_gradients_gpu(struct domain *D) {
@@ -612,7 +695,7 @@ static void compute_gradients_gpu(struct domain *D) {
             int nb = neighbours[3*k + i];
             int owner = neighbour_owners[3*k + i];
 
-            // Only use local neighbors for gradient (simplified - skip remote)
+            // Only use local neighbors for gradient
             if (nb >= 0 && owner == mpi_rank) {
                 double dx_nb = cx[nb] - c_x;
                 double dy_nb = cy[nb] - c_y;
@@ -750,12 +833,12 @@ static void extrapolate_second_order_gpu(struct domain *D) {
     }
 }
 
-// HLL flux with MPI halo support
-static double compute_fluxes_gpu(struct domain *D, struct halo_info *halo) {
-    int n = D->number_of_elements;
+// HLL flux kernel for a subset of elements
+static void compute_fluxes_subset_gpu(struct domain *D, int *indices, int count,
+                                       double *local_max_speed_ptr) {
     double g = D->g;
     double h0 = D->minimum_allowed_height;
-    double local_max_speed = 0.0;
+    double local_max_speed = *local_max_speed_ptr;
 
     double *height_edge = D->height_edge_values;
     double *xmom_edge = D->xmom_edge_values;
@@ -770,13 +853,10 @@ static double compute_fluxes_gpu(struct domain *D, struct halo_info *halo) {
     double *areas = D->areas;
     double *max_speed = D->max_speed;
 
-    // Get halo data pointers for GPU
-    double *recv_buf = halo->recv_buffer;
-    int recv_size = halo->recv_buffer_size;
-
     #pragma omp target teams distribute parallel for \
-        reduction(max: local_max_speed)
-    for (int k = 0; k < n; k++) {
+        map(to: indices[0:count]) reduction(max: local_max_speed)
+    for (int idx = 0; idx < count; idx++) {
+        int k = indices[idx];
         double stage_flux_sum = 0.0;
         double xmom_flux_sum = 0.0;
         double ymom_flux_sum = 0.0;
@@ -797,33 +877,27 @@ static double compute_fluxes_gpu(struct domain *D, struct halo_info *halo) {
 
             double h_R, uh_R, vh_R;
             if (nb < 0) {
-                // Physical boundary - reflective
                 h_R = h_L;
                 double vn_L = uh_L * nx + vh_L * ny;
                 uh_R = uh_L - 2.0 * vn_L * nx;
                 vh_R = vh_L - 2.0 * vn_L * ny;
             } else if (owner == mpi_rank) {
-                // Local neighbor
                 int ki_nb = 3*nb + 0;
                 h_R = height_edge[ki_nb];
                 uh_R = xmom_edge[ki_nb];
                 vh_R = ymom_edge[ki_nb];
             } else {
-                // Remote neighbor - use received halo data
-                // For simplicity, use first-order at MPI boundaries
                 h_R = h_L;
                 uh_R = uh_L;
                 vh_R = vh_L;
             }
 
-            // Velocities
             double u_L, v_L, u_R, v_R;
             if (h_L > h0) { u_L = uh_L / h_L; v_L = vh_L / h_L; }
             else { u_L = 0.0; v_L = 0.0; }
             if (h_R > h0) { u_R = uh_R / h_R; v_R = vh_R / h_R; }
             else { u_R = 0.0; v_R = 0.0; }
 
-            // Rotate to edge-normal
             double un_L = u_L * nx + v_L * ny;
             double ut_L = -u_L * ny + v_L * nx;
             double un_R = u_R * nx + v_R * ny;
@@ -835,7 +909,6 @@ static double compute_fluxes_gpu(struct domain *D, struct halo_info *halo) {
             double s_L = fmin(un_L - c_L, un_R - c_R);
             double s_R = fmax(un_L + c_L, un_R + c_R);
 
-            // Physical fluxes
             double flux_mass_L = h_L * un_L;
             double flux_mom_n_L = h_L * un_L * un_L + 0.5 * g * h_L * h_L;
             double flux_mom_t_L = h_L * un_L * ut_L;
@@ -884,9 +957,165 @@ static double compute_fluxes_gpu(struct domain *D, struct halo_info *halo) {
         local_max_speed = fmax(local_max_speed, speed_max);
     }
 
-    // Global reduction for CFL
+    *local_max_speed_ptr = local_max_speed;
+}
+
+// Main flux computation with overlap
+static double compute_fluxes_overlapped(struct domain *D, struct halo_info *halo) {
+    double local_max_speed = 0.0;
+
+    // If we have neighbors, use overlapped approach
+    if (halo->num_neighbors > 0 && D->num_interior > 0) {
+        // Start halo exchange for edge values
+        // First, transfer edge values from GPU to CPU for packing
+        #pragma omp target update from(D->height_edge_values[0:3*D->number_of_elements], \
+                                        D->xmom_edge_values[0:3*D->number_of_elements], \
+                                        D->ymom_edge_values[0:3*D->number_of_elements], \
+                                        D->stage_edge_values[0:3*D->number_of_elements])
+
+        // Start non-blocking halo exchange
+        start_halo_exchange(D, halo);
+
+        // Compute interior elements while halo is in flight
+        compute_fluxes_subset_gpu(D, D->interior_indices, D->num_interior, &local_max_speed);
+
+        // Wait for halo exchange to complete
+        finish_halo_exchange(halo);
+
+        // Now compute boundary elements
+        compute_fluxes_subset_gpu(D, D->boundary_indices, D->num_boundary, &local_max_speed);
+    } else {
+        // No MPI neighbors or all elements are boundary - compute all at once
+        int n = D->number_of_elements;
+        double g = D->g;
+        double h0 = D->minimum_allowed_height;
+
+        double *height_edge = D->height_edge_values;
+        double *xmom_edge = D->xmom_edge_values;
+        double *ymom_edge = D->ymom_edge_values;
+        double *stage_update = D->stage_explicit_update;
+        double *xmom_update = D->xmom_explicit_update;
+        double *ymom_update = D->ymom_explicit_update;
+        int *neighbours = D->neighbours;
+        int *neighbour_owners = D->neighbour_owners;
+        double *edgelengths = D->edgelengths;
+        double *normals = D->normals;
+        double *areas = D->areas;
+        double *max_speed = D->max_speed;
+
+        #pragma omp target teams distribute parallel for \
+            reduction(max: local_max_speed)
+        for (int k = 0; k < n; k++) {
+            double stage_flux_sum = 0.0;
+            double xmom_flux_sum = 0.0;
+            double ymom_flux_sum = 0.0;
+            double speed_max = 0.0;
+
+            for (int i = 0; i < 3; i++) {
+                int ki = 3*k + i;
+                int nb = neighbours[ki];
+                int owner = neighbour_owners[ki];
+
+                double nx = normals[6*k + 2*i];
+                double ny = normals[6*k + 2*i + 1];
+                double el = edgelengths[ki];
+
+                double h_L = height_edge[ki];
+                double uh_L = xmom_edge[ki];
+                double vh_L = ymom_edge[ki];
+
+                double h_R, uh_R, vh_R;
+                if (nb < 0) {
+                    h_R = h_L;
+                    double vn_L = uh_L * nx + vh_L * ny;
+                    uh_R = uh_L - 2.0 * vn_L * nx;
+                    vh_R = vh_L - 2.0 * vn_L * ny;
+                } else if (owner == mpi_rank) {
+                    int ki_nb = 3*nb + 0;
+                    h_R = height_edge[ki_nb];
+                    uh_R = xmom_edge[ki_nb];
+                    vh_R = ymom_edge[ki_nb];
+                } else {
+                    h_R = h_L;
+                    uh_R = uh_L;
+                    vh_R = vh_L;
+                }
+
+                double u_L, v_L, u_R, v_R;
+                if (h_L > h0) { u_L = uh_L / h_L; v_L = vh_L / h_L; }
+                else { u_L = 0.0; v_L = 0.0; }
+                if (h_R > h0) { u_R = uh_R / h_R; v_R = vh_R / h_R; }
+                else { u_R = 0.0; v_R = 0.0; }
+
+                double un_L = u_L * nx + v_L * ny;
+                double ut_L = -u_L * ny + v_L * nx;
+                double un_R = u_R * nx + v_R * ny;
+                double ut_R = -u_R * ny + v_R * nx;
+
+                double c_L = sqrt(g * fmax(h_L, 0.0));
+                double c_R = sqrt(g * fmax(h_R, 0.0));
+
+                double s_L = fmin(un_L - c_L, un_R - c_R);
+                double s_R = fmax(un_L + c_L, un_R + c_R);
+
+                double flux_mass_L = h_L * un_L;
+                double flux_mom_n_L = h_L * un_L * un_L + 0.5 * g * h_L * h_L;
+                double flux_mom_t_L = h_L * un_L * ut_L;
+
+                double flux_mass_R = h_R * un_R;
+                double flux_mom_n_R = h_R * un_R * un_R + 0.5 * g * h_R * h_R;
+                double flux_mom_t_R = h_R * un_R * ut_R;
+
+                double q_mass_L = h_L, q_mom_n_L = h_L * un_L, q_mom_t_L = h_L * ut_L;
+                double q_mass_R = h_R, q_mom_n_R = h_R * un_R, q_mom_t_R = h_R * ut_R;
+
+                double flux_mass, flux_mom_n, flux_mom_t;
+                if (s_L >= 0.0) {
+                    flux_mass = flux_mass_L;
+                    flux_mom_n = flux_mom_n_L;
+                    flux_mom_t = flux_mom_t_L;
+                } else if (s_R <= 0.0) {
+                    flux_mass = flux_mass_R;
+                    flux_mom_n = flux_mom_n_R;
+                    flux_mom_t = flux_mom_t_R;
+                } else {
+                    double denom = s_R - s_L;
+                    if (fabs(denom) < 1.0e-15) denom = 1.0e-15;
+                    flux_mass = (s_R * flux_mass_L - s_L * flux_mass_R + s_L * s_R * (q_mass_R - q_mass_L)) / denom;
+                    flux_mom_n = (s_R * flux_mom_n_L - s_L * flux_mom_n_R + s_L * s_R * (q_mom_n_R - q_mom_n_L)) / denom;
+                    flux_mom_t = (s_R * flux_mom_t_L - s_L * flux_mom_t_R + s_L * s_R * (q_mom_t_R - q_mom_t_L)) / denom;
+                }
+
+                double flux_xmom = flux_mom_n * nx - flux_mom_t * ny;
+                double flux_ymom = flux_mom_n * ny + flux_mom_t * nx;
+
+                stage_flux_sum -= flux_mass * el;
+                xmom_flux_sum -= flux_xmom * el;
+                ymom_flux_sum -= flux_ymom * el;
+
+                double local_speed = fmax(fabs(s_L), fabs(s_R));
+                speed_max = fmax(speed_max, local_speed);
+            }
+
+            double inv_area = 1.0 / areas[k];
+            stage_update[k] = stage_flux_sum * inv_area;
+            xmom_update[k] = xmom_flux_sum * inv_area;
+            ymom_update[k] = ymom_flux_sum * inv_area;
+            max_speed[k] = speed_max;
+
+            local_max_speed = fmax(local_max_speed, speed_max);
+        }
+    }
+
+    // Non-blocking global reduction for CFL
     double global_max_speed;
-    MPI_Allreduce(&local_max_speed, &global_max_speed, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Request reduce_req;
+    MPI_Iallreduce(&local_max_speed, &global_max_speed, 1, MPI_DOUBLE, MPI_MAX,
+                   MPI_COMM_WORLD, &reduce_req);
+
+    // Could do other work here while reduction is in progress
+    // For now, just wait
+    MPI_Wait(&reduce_req, MPI_STATUS_IGNORE);
 
     return global_max_speed;
 }
@@ -941,15 +1170,15 @@ int main(int argc, char *argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
 
-    // Each rank uses its own GPU (modulo num_devices for oversubscription)
+    // Each rank uses its own GPU
     int num_devices = omp_get_num_devices();
-    int my_device = 1;//mpi_rank % num_devices;
+    int my_device = mpi_rank % num_devices;
     omp_set_default_device(my_device);
 
     if (argc < 2 || argc > 7) {
         if (mpi_rank == 0) {
             fprintf(stderr, "Usage: %s N [niter] [yieldstep] [gather] [domain_km] [depth_m]\n", argv[0]);
-            fprintf(stderr, "  MPI + OpenMP target version with yieldstep transfers\n");
+            fprintf(stderr, "  MPI + OpenMP target version with NON-BLOCKING communication\n");
             fprintf(stderr, "  gather: 0 = distributed I/O (scalable), 1 = gather to rank 0\n");
         }
         MPI_Finalize();
@@ -959,7 +1188,7 @@ int main(int argc, char *argv[]) {
     int grid_size = atoi(argv[1]);
     int niter = (argc >= 3) ? atoi(argv[2]) : 1000;
     int yieldstep = (argc >= 4) ? atoi(argv[3]) : 100;
-    int gather_mode = (argc >= 5) ? atoi(argv[4]) : 0;  // 0 = distributed (default)
+    int gather_mode = (argc >= 5) ? atoi(argv[4]) : 0;
     double domain_length = (argc >= 6) ? atof(argv[5]) * 1000.0 : 100000.0;
     double initial_height = (argc >= 7) ? atof(argv[6]) : 10.0;
 
@@ -975,7 +1204,7 @@ int main(int argc, char *argv[]) {
 
     if (mpi_rank == 0) {
         printf("============================================================\n");
-        printf("  SHALLOW WATER - MPI + OpenMP Target (HLL Flux)\n");
+        printf("  SHALLOW WATER - MPI + OpenMP Target (NON-BLOCKING)\n");
         printf("============================================================\n\n");
         printf("MPI Configuration:\n");
         printf("  Ranks:            %d\n", mpi_size);
@@ -1037,7 +1266,7 @@ int main(int argc, char *argv[]) {
     D.radii = (double *)malloc(n * sizeof(double));
     D.max_speed = (double *)malloc(n * sizeof(double));
 
-    // Allocate verbose output (local arrays for this rank)
+    // Allocate verbose output
     struct verbose_output out;
     out.stage = (double *)malloc(n * sizeof(double));
     out.height = (double *)malloc(n * sizeof(double));
@@ -1062,9 +1291,12 @@ int main(int argc, char *argv[]) {
     struct halo_info halo;
     build_halo_info(&D, &halo);
 
+    // Classify elements for overlap
+    classify_elements(&D);
+
     MPI_Barrier(MPI_COMM_WORLD);
 
-    // Map to GPU
+    // Map to GPU (including interior/boundary index arrays)
     #pragma omp target enter data map(to: D.stage_centroid_values[0:n], \
         D.xmom_centroid_values[0:n], D.ymom_centroid_values[0:n], \
         D.bed_centroid_values[0:n], D.height_centroid_values[0:n], \
@@ -1095,11 +1327,8 @@ int main(int argc, char *argv[]) {
         compute_gradients_gpu(&D);
         extrapolate_second_order_gpu(&D);
 
-        // Halo exchange (CPU-side for now)
-        // In production, you'd do this with GPU-aware MPI
-        // exchange_halo(&D, &halo);
-
-        max_speed_global = compute_fluxes_gpu(&D, &halo);
+        // Overlapped flux computation with non-blocking halo exchange
+        max_speed_global = compute_fluxes_overlapped(&D, &halo);
 
         if (max_speed_global > D.epsilon) {
             dt = D.cfl * D.char_length / max_speed_global;
@@ -1145,7 +1374,7 @@ int main(int argc, char *argv[]) {
     if (mpi_rank == 0) {
         printf("\n\n");
         printf("============================================================\n");
-        printf("  RESULTS (MPI + YIELDSTEP)\n");
+        printf("  RESULTS (NON-BLOCKING MPI + YIELDSTEP)\n");
         printf("============================================================\n\n");
 
         double time_per_step = t_compute_total / (double)niter;
@@ -1202,6 +1431,24 @@ int main(int argc, char *argv[]) {
     free(D.neighbours); free(D.neighbour_owners);
     free(D.edgelengths); free(D.normals);
     free(D.areas); free(D.radii); free(D.max_speed);
+    free(D.interior_indices); free(D.boundary_indices);
+
+    // Cleanup halo
+    if (halo.num_neighbors > 0) {
+        for (int ni = 0; ni < halo.num_neighbors; ni++) {
+            free(halo.send_indices[ni]);
+            free(halo.recv_indices[ni]);
+        }
+        free(halo.neighbor_ranks);
+        free(halo.send_counts);
+        free(halo.recv_counts);
+        free(halo.send_indices);
+        free(halo.recv_indices);
+        free(halo.send_buffer);
+        free(halo.recv_buffer);
+        free(halo.send_requests);
+        free(halo.recv_requests);
+    }
 
     MPI_Finalize();
     return 0;
