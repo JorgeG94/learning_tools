@@ -11,7 +11,7 @@ NITER ?= 1000
 YIELDSTEP ?= 100
 
 # Targets
-all: sw_transfer sw_resident sw_yieldstep sw_verbose sw_verbose_f90 sw_async test_async test_async_cuda
+all: sw_transfer sw_resident sw_yieldstep sw_verbose sw_verbose_f90 sw_cfl sw_cfl2 sw_cfl2_f90 sw_async test_async test_async_cuda
 
 sw_transfer: sw_transfer.c
 	$(CC) $(CFLAGS) -o sw_transfer sw_transfer.c
@@ -39,6 +39,15 @@ sw_cuda_async: sw_cuda_async.cu
 
 sw_verbose_f90: sw_verbose.f90
 	$(FC) $(FFLAGS) -o sw_verbose_f90 sw_verbose.f90
+
+sw_cfl: sw_cfl.f90
+	$(FC) $(FFLAGS) -o sw_cfl sw_cfl.f90
+
+sw_cfl2: sw_cfl2.c
+	$(CC) $(CFLAGS) -o sw_cfl2 sw_cfl2.c
+
+sw_cfl2_f90: sw_cfl2.f90
+	$(FC) $(FFLAGS) -o sw_cfl2_f90 sw_cfl2.f90
 
 # Quick test of async behavior
 test-async: test_async
@@ -104,6 +113,29 @@ compare-c-fortran: sw_verbose sw_verbose_f90
 	@echo "=== FORTRAN VERSION ==="
 	OMP_TARGET_OFFLOAD=mandatory ./sw_verbose_f90 $(GRID) $(NITER) $(YIELDSTEP)
 
+# CFL timing estimator (estimates wall-clock for 2-day simulation)
+# Usage: make run-cfl GRID=10000 NITER=1000 DOMAIN_KM=100 DEPTH_M=10
+DOMAIN_KM ?= 100
+DEPTH_M ?= 10
+
+run-cfl: sw_cfl
+	OMP_TARGET_OFFLOAD=mandatory ./sw_cfl $(GRID) $(NITER) $(DOMAIN_KM) $(DEPTH_M)
+
+# Second-order CFL timing (C and Fortran)
+run-cfl2: sw_cfl2
+	OMP_TARGET_OFFLOAD=mandatory ./sw_cfl2 $(GRID) $(NITER) $(DOMAIN_KM) $(DEPTH_M)
+
+run-cfl2-f90: sw_cfl2_f90
+	OMP_TARGET_OFFLOAD=mandatory ./sw_cfl2_f90 $(GRID) $(NITER) $(DOMAIN_KM) $(DEPTH_M)
+
+# Compare first vs second order
+compare-order: sw_cfl sw_cfl2
+	@echo "=== FIRST ORDER ==="
+	OMP_TARGET_OFFLOAD=mandatory ./sw_cfl $(GRID) $(NITER) $(DOMAIN_KM) $(DEPTH_M)
+	@echo ""
+	@echo "=== SECOND ORDER ==="
+	OMP_TARGET_OFFLOAD=mandatory ./sw_cfl2 $(GRID) $(NITER) $(DOMAIN_KM) $(DEPTH_M)
+
 # Run shallow water - async version (compare sync vs async)
 run-async-sync: sw_async
 	OMP_TARGET_OFFLOAD=mandatory ./sw_async $(GRID) $(NITER) $(YIELDSTEP) 0
@@ -142,7 +174,7 @@ compare: sw_transfer sw_resident sw_yieldstep sw_verbose
 	OMP_TARGET_OFFLOAD=mandatory ./sw_verbose $(GRID) $(NITER) $(YIELDSTEP)
 
 clean:
-	rm -f sw_transfer sw_resident sw_yieldstep sw_verbose sw_async test_async test_async_cuda sw_cuda_async sw_mini sw_verbose_f90 *.mod
+	rm -f sw_transfer sw_resident sw_yieldstep sw_verbose sw_async test_async test_async_cuda sw_cuda_async sw_mini sw_verbose_f90 sw_cfl sw_cfl2 sw_cfl2_f90 *.mod
 
 .PHONY: all clean compare compare-async compare-c-fortran \
 	run-transfer-cpu run-transfer-gpu \
