@@ -101,56 +101,45 @@ static void print_progress(int current, int total, double elapsed, double sim_ti
 static void transfer_yieldstep(struct domain *D, struct verbose_output *out, double *t_transfer) {
     int n = D->number_of_elements;
     double t0 = omp_get_wtime();
+    double g = D->g;
+    double h0 = D->minimum_allowed_height;
 
-    // Transfer primary quantities (4 arrays)
-    #pragma omp target update from(D->stage_centroid_values[0:n])
-    #pragma omp target update from(D->height_centroid_values[0:n])
-    #pragma omp target update from(D->xmom_centroid_values[0:n])
-    #pragma omp target update from(D->ymom_centroid_values[0:n])
+    // Transfer all centroid arrays (8 arrays of size n) in one pragma
+    #pragma omp target update from( \
+        D->stage_centroid_values[0:n], \
+        D->height_centroid_values[0:n], \
+        D->xmom_centroid_values[0:n], \
+        D->ymom_centroid_values[0:n], \
+        D->stage_explicit_update[0:n], \
+        D->xmom_explicit_update[0:n], \
+        D->ymom_explicit_update[0:n], \
+        D->max_speed[0:n])
 
-    // Copy to output
+    // Transfer edge arrays (2 arrays of size 3n)
+    #pragma omp target update from( \
+        D->stage_edge_values[0:3*n], \
+        D->height_edge_values[0:3*n])
+
+    // Copy to output and compute derived quantities in one loop
+    #pragma omp parallel for
     for (int k = 0; k < n; k++) {
+        double h = D->height_centroid_values[k];
+        double uh = D->xmom_centroid_values[k];
+        double vh = D->ymom_centroid_values[k];
+
         out->stage[k] = D->stage_centroid_values[k];
-        out->height[k] = D->height_centroid_values[k];
-        out->xmom[k] = D->xmom_centroid_values[k];
-        out->ymom[k] = D->ymom_centroid_values[k];
-    }
-
-    // Transfer update arrays (3 arrays)
-    #pragma omp target update from(D->stage_explicit_update[0:n])
-    #pragma omp target update from(D->xmom_explicit_update[0:n])
-    #pragma omp target update from(D->ymom_explicit_update[0:n])
-
-    for (int k = 0; k < n; k++) {
+        out->height[k] = h;
+        out->xmom[k] = uh;
+        out->ymom[k] = vh;
         out->stage_update[k] = D->stage_explicit_update[k];
         out->xmom_update[k] = D->xmom_explicit_update[k];
         out->ymom_update[k] = D->ymom_explicit_update[k];
-    }
-
-    // Transfer edge arrays (2 arrays × 3n)
-    #pragma omp target update from(D->stage_edge_values[0:3*n])
-    #pragma omp target update from(D->height_edge_values[0:3*n])
-
-    for (int k = 0; k < 3*n; k++) {
-        out->stage_edge[k] = D->stage_edge_values[k];
-        out->height_edge[k] = D->height_edge_values[k];
-    }
-
-    // Transfer max_speed
-    #pragma omp target update from(D->max_speed[0:n])
-    for (int k = 0; k < n; k++) {
         out->max_speed_elem[k] = D->max_speed[k];
-    }
 
-    // Compute derived quantities on host
-    double g = D->g;
-    double eps = D->epsilon;
-    #pragma omp parallel for
-    for (int k = 0; k < n; k++) {
-        double h = out->height[k];
-        if (h > eps) {
-            double u = out->xmom[k] / h;
-            double v = out->ymom[k] / h;
+        // Compute derived quantities
+        if (h > h0) {
+            double u = uh / h;
+            double v = vh / h;
             double spd = sqrt(u*u + v*v);
             double c = sqrt(g * h);
             out->xvel[k] = u;
@@ -163,6 +152,13 @@ static void transfer_yieldstep(struct domain *D, struct verbose_output *out, dou
             out->speed[k] = 0.0;
             out->froude[k] = 0.0;
         }
+    }
+
+    // Copy edge arrays
+    #pragma omp parallel for
+    for (int k = 0; k < 3*n; k++) {
+        out->stage_edge[k] = D->stage_edge_values[k];
+        out->height_edge[k] = D->height_edge_values[k];
     }
 
     *t_transfer += omp_get_wtime() - t0;
