@@ -123,7 +123,7 @@ run-cfl: sw_cfl
 
 # Second-order CFL timing (C and Fortran)
 run-cfl2: sw_cfl2
-	OMP_TARGET_OFFLOAD=mandatory ./sw_cfl2 $(GRID) $(NITER) $(DOMAIN_KM) $(DEPTH_M)
+	OMP_TARGET_OFFLOAD=mandatory ./sw_cfl2 $(GRID) $(NITER) $(YIELDSTEP) $(DOMAIN_KM) $(DEPTH_M)
 
 run-cfl2-f90: sw_cfl2_f90
 	OMP_TARGET_OFFLOAD=mandatory ./sw_cfl2_f90 $(GRID) $(NITER) $(DOMAIN_KM) $(DEPTH_M)

@@ -64,28 +64,49 @@ program sw_cfl2
         real(dp) :: char_length
     end type domain_t
 
+    ! Verbose output type for yieldstep transfers
+    type :: verbose_output_t
+        real(dp), allocatable :: stage(:)
+        real(dp), allocatable :: height(:)
+        real(dp), allocatable :: xmom(:)
+        real(dp), allocatable :: ymom(:)
+        real(dp), allocatable :: xvel(:)
+        real(dp), allocatable :: yvel(:)
+        real(dp), allocatable :: speed(:)
+        real(dp), allocatable :: froude(:)
+        real(dp), allocatable :: stage_update(:)
+        real(dp), allocatable :: xmom_update(:)
+        real(dp), allocatable :: ymom_update(:)
+        real(dp), allocatable :: stage_edge(:)
+        real(dp), allocatable :: height_edge(:)
+        real(dp), allocatable :: max_speed_elem(:)
+    end type verbose_output_t
+
     ! Local variables
     type(domain_t) :: D
-    integer :: grid_size, niter, n
+    type(verbose_output_t) :: out
+    integer :: grid_size, niter, yieldstep, n, yield_count
     integer :: iter, nargs
-    real(dp) :: dt, sim_time
-    real(dp) :: t0, t_init, t_to_gpu, t_compute
+    real(dp) :: dt, sim_time, t_transfer
+    real(dp) :: t0, t_init, t_to_gpu, t_compute_total, t_compute_pure
     real(dp) :: target_time, estimated_steps, estimated_wallclock
     real(dp) :: max_speed_global, dt_cfl
     real(dp) :: time_per_step, steps_per_second
     real(dp) :: initial_height, domain_length
+    real(dp) :: mb_per_array, mb_per_edge, output_mb
     character(len=32) :: arg
 
     ! Parse command line arguments
     nargs = command_argument_count()
-    if (nargs < 1 .or. nargs > 4) then
-        print '(A)', 'Usage: sw_cfl2 N [niter] [domain_length_km] [initial_height_m]'
+    if (nargs < 1 .or. nargs > 5) then
+        print '(A)', 'Usage: sw_cfl2_f90 N [niter] [yieldstep] [domain_length_km] [initial_height_m]'
         print '(A)', '  N                = grid size (creates 2*(N-1)^2 triangles)'
         print '(A)', '  niter            = number of iterations to benchmark (default: 1000)'
+        print '(A)', '  yieldstep        = transfer output every N iters (default: 100)'
         print '(A)', '  domain_length_km = physical domain size in km (default: 100)'
         print '(A)', '  initial_height_m = initial water depth in meters (default: 10)'
         print '(A)', ''
-        print '(A)', 'This version uses SECOND-ORDER extrapolation with minmod limiter'
+        print '(A)', 'SECOND-ORDER extrapolation with minmod limiter + yieldstep transfers'
         stop 1
     end if
 
@@ -93,6 +114,7 @@ program sw_cfl2
     read(arg, *) grid_size
 
     niter = 1000
+    yieldstep = 100
     domain_length = 100.0d3  ! 100 km default
     initial_height = 10.0d0  ! 10 m default
 
@@ -102,11 +124,15 @@ program sw_cfl2
     end if
     if (nargs >= 3) then
         call get_command_argument(3, arg)
-        read(arg, *) domain_length
-        domain_length = domain_length * 1000.0d0
+        read(arg, *) yieldstep
     end if
     if (nargs >= 4) then
         call get_command_argument(4, arg)
+        read(arg, *) domain_length
+        domain_length = domain_length * 1000.0d0
+    end if
+    if (nargs >= 5) then
+        call get_command_argument(5, arg)
         read(arg, *) initial_height
     end if
 
@@ -134,10 +160,19 @@ program sw_cfl2
     print '(A)', ''
     print '(A)', 'Reconstruction:'
     print '(A)', '  Order:            SECOND (gradient + minmod limiter)'
+    print '(A,I0,A,I0,A)', '  Yieldstep:        ', yieldstep, ' (output every ', yieldstep, ' iterations)'
+    print '(A)', ''
+
+    ! Calculate output size per yieldstep
+    mb_per_array = real(n, dp) * 8.0d0 / (1024.0d0 * 1024.0d0)
+    mb_per_edge = real(3 * n, dp) * 8.0d0 / (1024.0d0 * 1024.0d0)
+    output_mb = 12.0d0 * mb_per_array + 2.0d0 * mb_per_edge
+    print '(A,F8.2,A)', 'Output per yieldstep: ', output_mb, ' MB (12 centroid + 2 edge arrays)'
     print '(A)', ''
 
     ! Allocate domain
     call allocate_domain(D, n)
+    call allocate_verbose_output(out, n)
 
     D%domain_length = domain_length
     D%cfl = 0.9d0
@@ -160,8 +195,10 @@ program sw_cfl2
     ! Run benchmark
     sim_time = 0.0d0
     dt = 0.0d0
+    t_transfer = 0.0d0
+    yield_count = 0
 
-    print '(A,I0,A)', 'Running ', niter, ' iterations (2nd order)...'
+    print '(A,I0,A)', 'Running ', niter, ' iterations (2nd order + yieldstep output)...'
     print '(A)', ''
 
     t0 = omp_get_wtime()
@@ -190,30 +227,43 @@ program sw_cfl2
         call update_gpu(D, n, dt)
         sim_time = sim_time + dt
 
+        ! 6. Yieldstep transfer
+        if (mod(iter, yieldstep) == 0) then
+            call transfer_yieldstep(D, out, n, t_transfer)
+            yield_count = yield_count + 1
+        end if
+
         if (mod(iter, 100) == 0) then
-            call print_progress(iter, niter, omp_get_wtime() - t0, sim_time)
+            call print_progress(iter, niter, omp_get_wtime() - t0, sim_time, yield_count)
         end if
     end do
-    t_compute = omp_get_wtime() - t0
+    t_compute_total = omp_get_wtime() - t0
+    t_compute_pure = t_compute_total - t_transfer
     print '(A)', ''
     print '(A)', ''
 
     call unmap_from_gpu(D, n)
 
     ! Results
-    time_per_step = t_compute / real(niter, dp)
+    time_per_step = t_compute_total / real(niter, dp)
     steps_per_second = 1.0d0 / time_per_step
     dt = sim_time / real(niter, dp)
     estimated_steps = target_time / dt
     estimated_wallclock = estimated_steps * time_per_step
 
     print '(A)', '============================================================'
-    print '(A)', '  BENCHMARK RESULTS (SECOND ORDER)'
+    print '(A)', '  BENCHMARK RESULTS (SECOND ORDER + YIELDSTEP)'
     print '(A)', '============================================================'
     print '(A)', ''
     print '(A,I0,A)', 'Ran ', niter, ' iterations:'
-    print '(A,F12.4,A)', '  Wall-clock time:  ', t_compute, ' s'
-    print '(A,F12.6,A)', '  Time per step:    ', time_per_step * 1000.0d0, ' ms'
+    print '(A,F12.4,A)', '  Total time:       ', t_compute_total, ' s'
+    print '(A,F12.4,A,F8.4,A)', '  Pure compute:     ', t_compute_pure, ' s (', &
+          t_compute_pure * 1000.0d0 / niter, ' ms/iter)'
+    print '(A,F12.4,A,I0,A,F8.4,A)', '  Yieldstep xfer:   ', t_transfer, ' s (', &
+          yield_count, ' yields, ', t_transfer * 1000.0d0 / max(yield_count, 1), ' ms/yield)'
+    print '(A,F12.2,A)', '  Transfer overhead: ', 100.0d0 * t_transfer / t_compute_pure, ' % of compute'
+    print '(A)', ''
+    print '(A,F12.6,A)', '  Time per step:    ', time_per_step * 1000.0d0, ' ms (including transfers)'
     print '(A,F12.2)', '  Steps per second: ', steps_per_second
     print '(A)', ''
     print '(A)', 'CFL Timestep:'
@@ -251,6 +301,7 @@ program sw_cfl2
     end if
     print '(A)', ''
 
+    call deallocate_verbose_output(out)
     call deallocate_domain(D)
 
 contains
@@ -874,8 +925,112 @@ contains
         !$omp end target teams distribute parallel do
     end subroutine update_gpu
 
-    subroutine print_progress(current, total, elapsed, sim_time)
-        integer, intent(in) :: current, total
+    subroutine allocate_verbose_output(out, n)
+        type(verbose_output_t), intent(inout) :: out
+        integer, intent(in) :: n
+
+        allocate(out%stage(n))
+        allocate(out%height(n))
+        allocate(out%xmom(n))
+        allocate(out%ymom(n))
+        allocate(out%xvel(n))
+        allocate(out%yvel(n))
+        allocate(out%speed(n))
+        allocate(out%froude(n))
+        allocate(out%stage_update(n))
+        allocate(out%xmom_update(n))
+        allocate(out%ymom_update(n))
+        allocate(out%stage_edge(3*n))
+        allocate(out%height_edge(3*n))
+        allocate(out%max_speed_elem(n))
+    end subroutine allocate_verbose_output
+
+    subroutine deallocate_verbose_output(out)
+        type(verbose_output_t), intent(inout) :: out
+
+        deallocate(out%stage, out%height, out%xmom, out%ymom)
+        deallocate(out%xvel, out%yvel, out%speed, out%froude)
+        deallocate(out%stage_update, out%xmom_update, out%ymom_update)
+        deallocate(out%stage_edge, out%height_edge, out%max_speed_elem)
+    end subroutine deallocate_verbose_output
+
+    subroutine transfer_yieldstep(D, out, n, t_transfer)
+        type(domain_t), intent(inout) :: D
+        type(verbose_output_t), intent(inout) :: out
+        integer, intent(in) :: n
+        real(dp), intent(inout) :: t_transfer
+
+        real(dp) :: t0
+        integer :: k
+        real(dp) :: h, uh, vh, vel_x, vel_y, spd, c
+
+        t0 = omp_get_wtime()
+
+        ! Transfer centroid arrays from GPU
+        !$omp target update from(D%stage_centroid_values(1:n), &
+        !$omp&    D%height_centroid_values(1:n), &
+        !$omp&    D%xmom_centroid_values(1:n), &
+        !$omp&    D%ymom_centroid_values(1:n), &
+        !$omp&    D%stage_explicit_update(1:n), &
+        !$omp&    D%xmom_explicit_update(1:n), &
+        !$omp&    D%ymom_explicit_update(1:n), &
+        !$omp&    D%stage_edge_values(1:3*n), &
+        !$omp&    D%height_edge_values(1:3*n), &
+        !$omp&    D%max_speed(1:n))
+
+        ! Copy to output arrays and compute derived quantities
+        !$omp parallel do private(h, uh, vh, vel_x, vel_y, spd, c)
+        do k = 1, n
+            out%stage(k) = D%stage_centroid_values(k)
+            out%height(k) = D%height_centroid_values(k)
+            out%xmom(k) = D%xmom_centroid_values(k)
+            out%ymom(k) = D%ymom_centroid_values(k)
+            out%stage_update(k) = D%stage_explicit_update(k)
+            out%xmom_update(k) = D%xmom_explicit_update(k)
+            out%ymom_update(k) = D%ymom_explicit_update(k)
+            out%max_speed_elem(k) = D%max_speed(k)
+
+            ! Compute velocities
+            h = D%height_centroid_values(k)
+            uh = D%xmom_centroid_values(k)
+            vh = D%ymom_centroid_values(k)
+
+            if (h > D%minimum_allowed_height) then
+                vel_x = uh / h
+                vel_y = vh / h
+            else
+                vel_x = 0.0d0
+                vel_y = 0.0d0
+            end if
+
+            out%xvel(k) = vel_x
+            out%yvel(k) = vel_y
+
+            spd = sqrt(vel_x * vel_x + vel_y * vel_y)
+            out%speed(k) = spd
+
+            c = sqrt(D%g * h)
+            if (c > D%epsilon) then
+                out%froude(k) = spd / c
+            else
+                out%froude(k) = 0.0d0
+            end if
+        end do
+        !$omp end parallel do
+
+        ! Copy edge arrays
+        !$omp parallel do
+        do k = 1, 3*n
+            out%stage_edge(k) = D%stage_edge_values(k)
+            out%height_edge(k) = D%height_edge_values(k)
+        end do
+        !$omp end parallel do
+
+        t_transfer = t_transfer + (omp_get_wtime() - t0)
+    end subroutine transfer_yieldstep
+
+    subroutine print_progress(current, total, elapsed, sim_time, yields)
+        integer, intent(in) :: current, total, yields
         real(dp), intent(in) :: elapsed, sim_time
 
         integer :: bar_width, filled, i
@@ -897,9 +1052,9 @@ contains
             end if
         end do
 
-        write(*, '(A,A,A,I3,A,I0,A,I0,A,F8.2,A,F10.4,A)', advance='no') &
+        write(*, '(A,A,A,I3,A,I0,A,I0,A,F8.2,A,F10.4,A,I0,A)', advance='no') &
             char(13), '  [', trim(bar), '] ', int(progress * 100), '% (', &
-            current, '/', total, ') ', elapsed, 's sim_t=', sim_time, 's'
+            current, '/', total, ') ', elapsed, 's sim_t=', sim_time, 's yields=', yields, ' '
     end subroutine print_progress
 
 end program sw_cfl2

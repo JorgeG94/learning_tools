@@ -63,7 +63,25 @@ struct domain {
     double char_length;
 };
 
-static void print_progress(int current, int total, double elapsed, double sim_time) {
+// Verbose output structure (for yieldstep transfers)
+struct verbose_output {
+    double *stage;
+    double *height;
+    double *xmom;
+    double *ymom;
+    double *xvel;
+    double *yvel;
+    double *speed;
+    double *froude;
+    double *stage_update;
+    double *xmom_update;
+    double *ymom_update;
+    double *stage_edge;
+    double *height_edge;
+    double *max_speed_elem;
+};
+
+static void print_progress(int current, int total, double elapsed, double sim_time, int yields) {
     int bar_width = 40;
     float progress = (float)current / total;
     int filled = (int)(bar_width * progress);
@@ -74,9 +92,80 @@ static void print_progress(int current, int total, double elapsed, double sim_ti
         else if (i == filled) printf(">");
         else printf(" ");
     }
-    printf("] %3d%% (%d/%d) %.2fs sim_t=%.4fs",
-           (int)(progress * 100), current, total, elapsed, sim_time);
+    printf("] %3d%% (%d/%d) %.2fs sim_t=%.4fs [%d yields]",
+           (int)(progress * 100), current, total, elapsed, sim_time, yields);
     fflush(stdout);
+}
+
+// Transfer verbose output from GPU
+static void transfer_yieldstep(struct domain *D, struct verbose_output *out, double *t_transfer) {
+    int n = D->number_of_elements;
+    double t0 = omp_get_wtime();
+
+    // Transfer primary quantities (4 arrays)
+    #pragma omp target update from(D->stage_centroid_values[0:n])
+    #pragma omp target update from(D->height_centroid_values[0:n])
+    #pragma omp target update from(D->xmom_centroid_values[0:n])
+    #pragma omp target update from(D->ymom_centroid_values[0:n])
+
+    // Copy to output
+    for (int k = 0; k < n; k++) {
+        out->stage[k] = D->stage_centroid_values[k];
+        out->height[k] = D->height_centroid_values[k];
+        out->xmom[k] = D->xmom_centroid_values[k];
+        out->ymom[k] = D->ymom_centroid_values[k];
+    }
+
+    // Transfer update arrays (3 arrays)
+    #pragma omp target update from(D->stage_explicit_update[0:n])
+    #pragma omp target update from(D->xmom_explicit_update[0:n])
+    #pragma omp target update from(D->ymom_explicit_update[0:n])
+
+    for (int k = 0; k < n; k++) {
+        out->stage_update[k] = D->stage_explicit_update[k];
+        out->xmom_update[k] = D->xmom_explicit_update[k];
+        out->ymom_update[k] = D->ymom_explicit_update[k];
+    }
+
+    // Transfer edge arrays (2 arrays × 3n)
+    #pragma omp target update from(D->stage_edge_values[0:3*n])
+    #pragma omp target update from(D->height_edge_values[0:3*n])
+
+    for (int k = 0; k < 3*n; k++) {
+        out->stage_edge[k] = D->stage_edge_values[k];
+        out->height_edge[k] = D->height_edge_values[k];
+    }
+
+    // Transfer max_speed
+    #pragma omp target update from(D->max_speed[0:n])
+    for (int k = 0; k < n; k++) {
+        out->max_speed_elem[k] = D->max_speed[k];
+    }
+
+    // Compute derived quantities on host
+    double g = D->g;
+    double eps = D->epsilon;
+    #pragma omp parallel for
+    for (int k = 0; k < n; k++) {
+        double h = out->height[k];
+        if (h > eps) {
+            double u = out->xmom[k] / h;
+            double v = out->ymom[k] / h;
+            double spd = sqrt(u*u + v*v);
+            double c = sqrt(g * h);
+            out->xvel[k] = u;
+            out->yvel[k] = v;
+            out->speed[k] = spd;
+            out->froude[k] = spd / c;
+        } else {
+            out->xvel[k] = 0.0;
+            out->yvel[k] = 0.0;
+            out->speed[k] = 0.0;
+            out->froude[k] = 0.0;
+        }
+    }
+
+    *t_transfer += omp_get_wtime() - t0;
 }
 
 static void generate_mesh(struct domain *D, int grid_size) {
@@ -474,16 +563,22 @@ static void update_gpu(struct domain *D, double dt) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 2 || argc > 5) {
-        fprintf(stderr, "Usage: %s N [niter] [domain_length_km] [initial_height_m]\n", argv[0]);
-        fprintf(stderr, "  This version uses SECOND-ORDER extrapolation with minmod limiter\n");
+    if (argc < 2 || argc > 6) {
+        fprintf(stderr, "Usage: %s N [niter] [yieldstep] [domain_length_km] [initial_height_m]\n", argv[0]);
+        fprintf(stderr, "  N                = grid size (creates 2*(N-1)^2 triangles)\n");
+        fprintf(stderr, "  niter            = number of iterations (default: 1000)\n");
+        fprintf(stderr, "  yieldstep        = transfer output every N iters (default: 100)\n");
+        fprintf(stderr, "  domain_length_km = physical domain size in km (default: 100)\n");
+        fprintf(stderr, "  initial_height_m = initial water depth in meters (default: 10)\n");
+        fprintf(stderr, "\n  SECOND-ORDER extrapolation with minmod limiter + yieldstep transfers\n");
         return 1;
     }
 
     int grid_size = atoi(argv[1]);
     int niter = (argc >= 3) ? atoi(argv[2]) : 1000;
-    double domain_length = (argc >= 4) ? atof(argv[3]) * 1000.0 : 100000.0;
-    double initial_height = (argc >= 5) ? atof(argv[4]) : 10.0;
+    int yieldstep = (argc >= 4) ? atoi(argv[3]) : 100;
+    double domain_length = (argc >= 5) ? atof(argv[4]) * 1000.0 : 100000.0;
+    double initial_height = (argc >= 6) ? atof(argv[5]) : 10.0;
 
     if (grid_size < 3) {
         fprintf(stderr, "Error: Grid size must be at least 3\n");
@@ -507,7 +602,15 @@ int main(int argc, char *argv[]) {
     printf("  Triangles:        %d\n\n", n);
 
     printf("Reconstruction:\n");
-    printf("  Order:            SECOND (gradient + minmod limiter)\n\n");
+    printf("  Order:            SECOND (gradient + minmod limiter)\n");
+    printf("  Yieldstep:        %d (output every %d iterations)\n\n", yieldstep, yieldstep);
+
+    // Calculate output size per yieldstep
+    double mb_per_array = (double)(n * sizeof(double)) / (1024.0 * 1024.0);
+    double mb_per_edge = (double)(3 * n * sizeof(double)) / (1024.0 * 1024.0);
+    // 12 centroid arrays + 2 edge arrays
+    double output_mb = 12.0 * mb_per_array + 2.0 * mb_per_edge;
+    printf("Output per yieldstep: %.2f MB (12 centroid + 2 edge arrays)\n\n", output_mb);
 
     // Allocate domain
     struct domain D;
@@ -553,6 +656,23 @@ int main(int argc, char *argv[]) {
     D.radii = (double *)malloc(n * sizeof(double));
     D.max_speed = (double *)malloc(n * sizeof(double));
 
+    // Allocate verbose output
+    struct verbose_output out;
+    out.stage = (double *)malloc(n * sizeof(double));
+    out.height = (double *)malloc(n * sizeof(double));
+    out.xmom = (double *)malloc(n * sizeof(double));
+    out.ymom = (double *)malloc(n * sizeof(double));
+    out.xvel = (double *)malloc(n * sizeof(double));
+    out.yvel = (double *)malloc(n * sizeof(double));
+    out.speed = (double *)malloc(n * sizeof(double));
+    out.froude = (double *)malloc(n * sizeof(double));
+    out.stage_update = (double *)malloc(n * sizeof(double));
+    out.xmom_update = (double *)malloc(n * sizeof(double));
+    out.ymom_update = (double *)malloc(n * sizeof(double));
+    out.stage_edge = (double *)malloc(3 * n * sizeof(double));
+    out.height_edge = (double *)malloc(3 * n * sizeof(double));
+    out.max_speed_elem = (double *)malloc(n * sizeof(double));
+
     // Initialize
     double t0 = omp_get_wtime();
     generate_mesh(&D, grid_size);
@@ -580,8 +700,10 @@ int main(int argc, char *argv[]) {
     double sim_time = 0.0;
     double dt = 0.0;
     double max_speed_global;
+    double t_transfer = 0.0;
+    int yield_count = 0;
 
-    printf("Running %d iterations (2nd order)...\n\n", niter);
+    printf("Running %d iterations (2nd order + yieldstep output)...\n\n", niter);
 
     t0 = omp_get_wtime();
     for (int iter = 0; iter < niter; iter++) {
@@ -608,11 +730,18 @@ int main(int argc, char *argv[]) {
         update_gpu(&D, dt);
         sim_time += dt;
 
+        // 6. Yieldstep transfer
+        if ((iter + 1) % yieldstep == 0) {
+            transfer_yieldstep(&D, &out, &t_transfer);
+            yield_count++;
+        }
+
         if ((iter + 1) % 100 == 0) {
-            print_progress(iter + 1, niter, omp_get_wtime() - t0, sim_time);
+            print_progress(iter + 1, niter, omp_get_wtime() - t0, sim_time, yield_count);
         }
     }
-    double t_compute = omp_get_wtime() - t0;
+    double t_compute_total = omp_get_wtime() - t0;
+    double t_compute_pure = t_compute_total - t_transfer;
     printf("\n\n");
 
     // Cleanup GPU
@@ -631,19 +760,23 @@ int main(int argc, char *argv[]) {
         D.areas[0:n], D.radii[0:n], D.max_speed[0:n])
 
     // Results
-    double time_per_step = t_compute / (double)niter;
+    double time_per_step = t_compute_total / (double)niter;
     double steps_per_second = 1.0 / time_per_step;
     dt = sim_time / (double)niter;
     double estimated_steps = target_time / dt;
     double estimated_wallclock = estimated_steps * time_per_step;
 
     printf("============================================================\n");
-    printf("  BENCHMARK RESULTS (SECOND ORDER)\n");
+    printf("  BENCHMARK RESULTS (SECOND ORDER + YIELDSTEP)\n");
     printf("============================================================\n\n");
 
     printf("Ran %d iterations:\n", niter);
-    printf("  Wall-clock time:  %.4f s\n", t_compute);
-    printf("  Time per step:    %.6f ms\n", time_per_step * 1000.0);
+    printf("  Total time:       %.4f s\n", t_compute_total);
+    printf("  Pure compute:     %.4f s (%.4f ms/iter)\n", t_compute_pure, t_compute_pure * 1000.0 / niter);
+    printf("  Yieldstep xfer:   %.4f s (%d yields, %.4f ms/yield)\n",
+           t_transfer, yield_count, yield_count > 0 ? t_transfer * 1000.0 / yield_count : 0.0);
+    printf("  Transfer overhead: %.2f%% of compute time\n\n", 100.0 * t_transfer / t_compute_pure);
+    printf("  Time per step:    %.6f ms (including transfers)\n", time_per_step * 1000.0);
     printf("  Steps per second: %.2f\n\n", steps_per_second);
 
     printf("CFL Timestep:\n");
@@ -694,6 +827,12 @@ int main(int argc, char *argv[]) {
     free(D.edge_midpoint_x); free(D.edge_midpoint_y);
     free(D.neighbours); free(D.edgelengths); free(D.normals);
     free(D.areas); free(D.radii); free(D.max_speed);
+
+    // Cleanup verbose output
+    free(out.stage); free(out.height); free(out.xmom); free(out.ymom);
+    free(out.xvel); free(out.yvel); free(out.speed); free(out.froude);
+    free(out.stage_update); free(out.xmom_update); free(out.ymom_update);
+    free(out.stage_edge); free(out.height_edge); free(out.max_speed_elem);
 
     return 0;
 }
