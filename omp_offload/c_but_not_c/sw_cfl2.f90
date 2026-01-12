@@ -802,76 +802,168 @@ contains
         !$omp end target teams distribute parallel do
     end subroutine extrapolate_second_order_gpu
 
+    ! HLL flux computation with proper rotation and physical fluxes
+    ! This is much closer to real ANUGA's flux computation
     subroutine compute_fluxes_gpu(D, n, max_speed_out)
         type(domain_t), intent(inout) :: D
         integer, intent(in) :: n
         real(dp), intent(out) :: max_speed_out
 
         integer :: k, i, ki, nb, ki_nb
-        real(dp) :: g, epsilon
-        real(dp) :: stage_accum, xmom_accum, ymom_accum, speed_max
-        real(dp) :: h_left, h_right, uh_left, uh_right, vh_left, vh_right
-        real(dp) :: edgelen, nx, ny, c_left, c_right, c_max
+        real(dp) :: g, h0
+        real(dp) :: stage_flux_sum, xmom_flux_sum, ymom_flux_sum, speed_max
+        real(dp) :: h_L, h_R, uh_L, uh_R, vh_L, vh_R
+        real(dp) :: u_L, v_L, u_R, v_R
+        real(dp) :: un_L, ut_L, un_R, ut_R
+        real(dp) :: c_L, c_R, s_L, s_R
+        real(dp) :: flux_mass_L, flux_mom_n_L, flux_mom_t_L
+        real(dp) :: flux_mass_R, flux_mom_n_R, flux_mom_t_R
+        real(dp) :: q_mass_L, q_mom_n_L, q_mom_t_L
+        real(dp) :: q_mass_R, q_mom_n_R, q_mom_t_R
+        real(dp) :: flux_mass, flux_mom_n, flux_mom_t
+        real(dp) :: flux_xmom, flux_ymom
+        real(dp) :: edgelen, nx, ny, vn_L, denom, local_speed, inv_area
         real(dp) :: global_max_speed
 
         g = D%g
-        epsilon = D%epsilon
+        h0 = D%minimum_allowed_height
         global_max_speed = 0.0d0
 
         !$omp target teams distribute parallel do &
-        !$omp& private(i, ki, nb, ki_nb, stage_accum, xmom_accum, ymom_accum, speed_max, &
-        !$omp&         h_left, h_right, uh_left, uh_right, vh_left, vh_right, &
-        !$omp&         edgelen, nx, ny, c_left, c_right, c_max) &
+        !$omp& private(i, ki, nb, ki_nb, stage_flux_sum, xmom_flux_sum, ymom_flux_sum, speed_max, &
+        !$omp&         h_L, h_R, uh_L, uh_R, vh_L, vh_R, u_L, v_L, u_R, v_R, &
+        !$omp&         un_L, ut_L, un_R, ut_R, c_L, c_R, s_L, s_R, &
+        !$omp&         flux_mass_L, flux_mom_n_L, flux_mom_t_L, &
+        !$omp&         flux_mass_R, flux_mom_n_R, flux_mom_t_R, &
+        !$omp&         q_mass_L, q_mom_n_L, q_mom_t_L, q_mass_R, q_mom_n_R, q_mom_t_R, &
+        !$omp&         flux_mass, flux_mom_n, flux_mom_t, flux_xmom, flux_ymom, &
+        !$omp&         edgelen, nx, ny, vn_L, denom, local_speed, inv_area) &
         !$omp& reduction(max: global_max_speed)
         do k = 1, n
-            stage_accum = 0.0d0
-            xmom_accum = 0.0d0
-            ymom_accum = 0.0d0
+            stage_flux_sum = 0.0d0
+            xmom_flux_sum = 0.0d0
+            ymom_flux_sum = 0.0d0
             speed_max = 0.0d0
 
             do i = 1, 3
                 ki = 3*(k-1) + i
                 nb = D%neighbours(ki)
 
-                ! Left state (from this element's edge)
-                h_left = D%height_edge_values(ki)
-                uh_left = D%xmom_edge_values(ki)
-                vh_left = D%ymom_edge_values(ki)
-
-                ! Right state (from neighbor or boundary)
-                if (nb >= 1) then
-                    ! Find which edge of neighbor shares this edge
-                    ! For structured mesh, it's typically edge 0
-                    ki_nb = 3*(nb-1) + 1
-                    h_right = D%height_edge_values(ki_nb)
-                    uh_right = D%xmom_edge_values(ki_nb)
-                    vh_right = D%ymom_edge_values(ki_nb)
-                else
-                    ! Reflective boundary
-                    h_right = h_left
-                    uh_right = -uh_left
-                    vh_right = -vh_left
-                end if
-
-                edgelen = D%edgelengths(ki)
+                ! Edge normal (outward pointing)
                 nx = D%normals(6*(k-1) + 2*(i-1) + 1)
                 ny = D%normals(6*(k-1) + 2*(i-1) + 2)
+                edgelen = D%edgelengths(ki)
 
-                c_left = sqrt(g * max(h_left, 0.0d0))
-                c_right = sqrt(g * max(h_right, 0.0d0))
-                c_max = max(c_left, c_right)
+                ! Left state (this element)
+                h_L = D%height_edge_values(ki)
+                uh_L = D%xmom_edge_values(ki)
+                vh_L = D%ymom_edge_values(ki)
 
-                ! Rusanov flux
-                stage_accum = stage_accum + c_max * (h_left - h_right) * edgelen
-                xmom_accum = xmom_accum + c_max * (uh_left - uh_right) * edgelen * nx
-                ymom_accum = ymom_accum + c_max * (vh_left - vh_right) * edgelen * ny
+                ! Right state (neighbor or boundary)
+                if (nb >= 1) then
+                    ki_nb = 3*(nb-1) + 1
+                    h_R = D%height_edge_values(ki_nb)
+                    uh_R = D%xmom_edge_values(ki_nb)
+                    vh_R = D%ymom_edge_values(ki_nb)
+                else
+                    ! Reflective boundary: reflect normal momentum
+                    h_R = h_L
+                    vn_L = uh_L * nx + vh_L * ny
+                    uh_R = uh_L - 2.0d0 * vn_L * nx
+                    vh_R = vh_L - 2.0d0 * vn_L * ny
+                end if
 
-                if (c_max > epsilon) speed_max = max(speed_max, c_max)
+                ! Compute velocities (with desingularization)
+                if (h_L > h0) then
+                    u_L = uh_L / h_L
+                    v_L = vh_L / h_L
+                else
+                    u_L = 0.0d0
+                    v_L = 0.0d0
+                end if
+                if (h_R > h0) then
+                    u_R = uh_R / h_R
+                    v_R = vh_R / h_R
+                else
+                    u_R = 0.0d0
+                    v_R = 0.0d0
+                end if
+
+                ! Rotate to edge-normal coordinates
+                un_L = u_L * nx + v_L * ny
+                ut_L = -u_L * ny + v_L * nx
+                un_R = u_R * nx + v_R * ny
+                ut_R = -u_R * ny + v_R * nx
+
+                ! Wave speeds
+                c_L = sqrt(g * max(h_L, 0.0d0))
+                c_R = sqrt(g * max(h_R, 0.0d0))
+
+                ! HLL wave speed estimates (Einfeldt)
+                s_L = min(un_L - c_L, un_R - c_R)
+                s_R = max(un_L + c_L, un_R + c_R)
+
+                ! Physical fluxes in normal direction
+                flux_mass_L = h_L * un_L
+                flux_mom_n_L = h_L * un_L * un_L + 0.5d0 * g * h_L * h_L
+                flux_mom_t_L = h_L * un_L * ut_L
+
+                flux_mass_R = h_R * un_R
+                flux_mom_n_R = h_R * un_R * un_R + 0.5d0 * g * h_R * h_R
+                flux_mom_t_R = h_R * un_R * ut_R
+
+                ! Conserved variables
+                q_mass_L = h_L
+                q_mom_n_L = h_L * un_L
+                q_mom_t_L = h_L * ut_L
+
+                q_mass_R = h_R
+                q_mom_n_R = h_R * un_R
+                q_mom_t_R = h_R * ut_R
+
+                ! HLL flux
+                if (s_L >= 0.0d0) then
+                    ! Supersonic flow to the right
+                    flux_mass = flux_mass_L
+                    flux_mom_n = flux_mom_n_L
+                    flux_mom_t = flux_mom_t_L
+                else if (s_R <= 0.0d0) then
+                    ! Supersonic flow to the left
+                    flux_mass = flux_mass_R
+                    flux_mom_n = flux_mom_n_R
+                    flux_mom_t = flux_mom_t_R
+                else
+                    ! Subsonic - HLL average
+                    denom = s_R - s_L
+                    if (abs(denom) < 1.0d-15) denom = 1.0d-15
+
+                    flux_mass = (s_R * flux_mass_L - s_L * flux_mass_R &
+                               + s_L * s_R * (q_mass_R - q_mass_L)) / denom
+                    flux_mom_n = (s_R * flux_mom_n_L - s_L * flux_mom_n_R &
+                                + s_L * s_R * (q_mom_n_R - q_mom_n_L)) / denom
+                    flux_mom_t = (s_R * flux_mom_t_L - s_L * flux_mom_t_R &
+                                + s_L * s_R * (q_mom_t_R - q_mom_t_L)) / denom
+                end if
+
+                ! Rotate momentum flux back to (x,y) coordinates
+                flux_xmom = flux_mom_n * nx - flux_mom_t * ny
+                flux_ymom = flux_mom_n * ny + flux_mom_t * nx
+
+                ! Accumulate (negative because outward normal)
+                stage_flux_sum = stage_flux_sum - flux_mass * edgelen
+                xmom_flux_sum = xmom_flux_sum - flux_xmom * edgelen
+                ymom_flux_sum = ymom_flux_sum - flux_ymom * edgelen
+
+                ! Track max wave speed for CFL
+                local_speed = max(abs(s_L), abs(s_R))
+                speed_max = max(speed_max, local_speed)
             end do
 
-            D%stage_explicit_update(k) = stage_accum / D%areas(k)
-            D%xmom_explicit_update(k) = xmom_accum / D%areas(k)
-            D%ymom_explicit_update(k) = ymom_accum / D%areas(k)
+            ! Divide by area to get update rate
+            inv_area = 1.0d0 / D%areas(k)
+            D%stage_explicit_update(k) = stage_flux_sum * inv_area
+            D%xmom_explicit_update(k) = xmom_flux_sum * inv_area
+            D%ymom_explicit_update(k) = ymom_flux_sum * inv_area
             D%max_speed(k) = speed_max
 
             global_max_speed = max(global_max_speed, speed_max)

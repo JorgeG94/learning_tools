@@ -442,15 +442,20 @@ static void extrapolate_second_order_gpu(struct domain *D) {
     }
 }
 
+// HLL flux computation with proper rotation and physical fluxes
+// This is much closer to real ANUGA's flux computation
 static double compute_fluxes_gpu(struct domain *D) {
     int n = D->number_of_elements;
     double g = D->g;
     double epsilon = D->epsilon;
+    double h0 = D->minimum_allowed_height;
     double global_max_speed = 0.0;
 
+    double *stage_edge = D->stage_edge_values;
     double *height_edge = D->height_edge_values;
     double *xmom_edge = D->xmom_edge_values;
     double *ymom_edge = D->ymom_edge_values;
+    double *bed_c = D->bed_centroid_values;
     double *stage_update = D->stage_explicit_update;
     double *xmom_update = D->xmom_explicit_update;
     double *ymom_update = D->ymom_explicit_update;
@@ -463,50 +468,141 @@ static double compute_fluxes_gpu(struct domain *D) {
     #pragma omp target teams distribute parallel for \
         reduction(max: global_max_speed)
     for (int k = 0; k < n; k++) {
-        double stage_accum = 0.0;
-        double xmom_accum = 0.0;
-        double ymom_accum = 0.0;
+        double stage_flux_sum = 0.0;
+        double xmom_flux_sum = 0.0;
+        double ymom_flux_sum = 0.0;
         double speed_max = 0.0;
 
         for (int i = 0; i < 3; i++) {
             int ki = 3*k + i;
             int nb = neighbours[ki];
 
-            double h_left = height_edge[ki];
-            double uh_left = xmom_edge[ki];
-            double vh_left = ymom_edge[ki];
-
-            double h_right, uh_right, vh_right;
-            if (nb >= 0) {
-                int ki_nb = 3*nb + 0;
-                h_right = height_edge[ki_nb];
-                uh_right = xmom_edge[ki_nb];
-                vh_right = ymom_edge[ki_nb];
-            } else {
-                h_right = h_left;
-                uh_right = -uh_left;
-                vh_right = -vh_left;
-            }
-
-            double el = edgelengths[ki];
+            // Edge normal (outward pointing)
             double nx = normals[6*k + 2*i];
             double ny = normals[6*k + 2*i + 1];
+            double el = edgelengths[ki];
 
-            double c_left = sqrt(g * fmax(h_left, 0.0));
-            double c_right = sqrt(g * fmax(h_right, 0.0));
-            double c_max = fmax(c_left, c_right);
+            // Left state (this element)
+            double h_L = height_edge[ki];
+            double uh_L = xmom_edge[ki];
+            double vh_L = ymom_edge[ki];
 
-            stage_accum += c_max * (h_left - h_right) * el;
-            xmom_accum += c_max * (uh_left - uh_right) * el * nx;
-            ymom_accum += c_max * (vh_left - vh_right) * el * ny;
+            // Right state (neighbor or boundary)
+            double h_R, uh_R, vh_R;
+            if (nb >= 0) {
+                // Find matching edge on neighbor (simplified: use edge 0)
+                int ki_nb = 3*nb + 0;
+                h_R = height_edge[ki_nb];
+                uh_R = xmom_edge[ki_nb];
+                vh_R = ymom_edge[ki_nb];
+            } else {
+                // Reflective boundary: reflect normal momentum
+                h_R = h_L;
+                // Reflect velocity: v_R = v_L - 2*(v_L.n)*n
+                double vn_L = (uh_L * nx + vh_L * ny);
+                uh_R = uh_L - 2.0 * vn_L * nx;
+                vh_R = vh_L - 2.0 * vn_L * ny;
+            }
 
-            if (c_max > epsilon) speed_max = fmax(speed_max, c_max);
+            // Compute velocities (with desingularization)
+            double u_L, v_L, u_R, v_R;
+            if (h_L > h0) {
+                u_L = uh_L / h_L;
+                v_L = vh_L / h_L;
+            } else {
+                u_L = 0.0;
+                v_L = 0.0;
+            }
+            if (h_R > h0) {
+                u_R = uh_R / h_R;
+                v_R = vh_R / h_R;
+            } else {
+                u_R = 0.0;
+                v_R = 0.0;
+            }
+
+            // Rotate to edge-normal coordinates
+            // un = u*nx + v*ny (normal velocity)
+            // ut = -u*ny + v*nx (tangential velocity)
+            double un_L = u_L * nx + v_L * ny;
+            double ut_L = -u_L * ny + v_L * nx;
+            double un_R = u_R * nx + v_R * ny;
+            double ut_R = -u_R * ny + v_R * nx;
+
+            // Wave speeds
+            double c_L = sqrt(g * fmax(h_L, 0.0));
+            double c_R = sqrt(g * fmax(h_R, 0.0));
+
+            // HLL wave speed estimates (Einfeldt)
+            double s_L = fmin(un_L - c_L, un_R - c_R);
+            double s_R = fmax(un_L + c_L, un_R + c_R);
+
+            // Physical fluxes in normal direction
+            // F = [h*un, h*un^2 + 0.5*g*h^2, h*un*ut]
+            double flux_mass_L = h_L * un_L;
+            double flux_mom_n_L = h_L * un_L * un_L + 0.5 * g * h_L * h_L;
+            double flux_mom_t_L = h_L * un_L * ut_L;
+
+            double flux_mass_R = h_R * un_R;
+            double flux_mom_n_R = h_R * un_R * un_R + 0.5 * g * h_R * h_R;
+            double flux_mom_t_R = h_R * un_R * ut_R;
+
+            // Conserved variables
+            double q_mass_L = h_L;
+            double q_mom_n_L = h_L * un_L;
+            double q_mom_t_L = h_L * ut_L;
+
+            double q_mass_R = h_R;
+            double q_mom_n_R = h_R * un_R;
+            double q_mom_t_R = h_R * ut_R;
+
+            // HLL flux
+            double flux_mass, flux_mom_n, flux_mom_t;
+
+            if (s_L >= 0.0) {
+                // Supersonic flow to the right - use left flux
+                flux_mass = flux_mass_L;
+                flux_mom_n = flux_mom_n_L;
+                flux_mom_t = flux_mom_t_L;
+            } else if (s_R <= 0.0) {
+                // Supersonic flow to the left - use right flux
+                flux_mass = flux_mass_R;
+                flux_mom_n = flux_mom_n_R;
+                flux_mom_t = flux_mom_t_R;
+            } else {
+                // Subsonic - HLL average
+                double denom = s_R - s_L;
+                if (fabs(denom) < 1.0e-15) denom = 1.0e-15;
+
+                flux_mass = (s_R * flux_mass_L - s_L * flux_mass_R
+                           + s_L * s_R * (q_mass_R - q_mass_L)) / denom;
+                flux_mom_n = (s_R * flux_mom_n_L - s_L * flux_mom_n_R
+                            + s_L * s_R * (q_mom_n_R - q_mom_n_L)) / denom;
+                flux_mom_t = (s_R * flux_mom_t_L - s_L * flux_mom_t_R
+                            + s_L * s_R * (q_mom_t_R - q_mom_t_L)) / denom;
+            }
+
+            // Rotate momentum flux back to (x,y) coordinates
+            // flux_x = flux_n * nx - flux_t * ny
+            // flux_y = flux_n * ny + flux_t * nx
+            double flux_xmom = flux_mom_n * nx - flux_mom_t * ny;
+            double flux_ymom = flux_mom_n * ny + flux_mom_t * nx;
+
+            // Accumulate (negative because outward normal)
+            stage_flux_sum -= flux_mass * el;
+            xmom_flux_sum -= flux_xmom * el;
+            ymom_flux_sum -= flux_ymom * el;
+
+            // Track max wave speed for CFL
+            double local_speed = fmax(fabs(s_L), fabs(s_R));
+            speed_max = fmax(speed_max, local_speed);
         }
 
+        // Divide by area to get update rate
         double inv_area = 1.0 / areas[k];
-        stage_update[k] = stage_accum * inv_area;
-        xmom_update[k] = xmom_accum * inv_area;
-        ymom_update[k] = ymom_accum * inv_area;
+        stage_update[k] = stage_flux_sum * inv_area;
+        xmom_update[k] = xmom_flux_sum * inv_area;
+        ymom_update[k] = ymom_flux_sum * inv_area;
         max_speed[k] = speed_max;
 
         global_max_speed = fmax(global_max_speed, speed_max);
