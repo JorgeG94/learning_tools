@@ -4,7 +4,7 @@
 
 FC       ?= nvfortran
 FFLAGS   ?= -O3
-GPUFLAGS ?= -stdpar=gpu -mp=gpu -gpu=mem:separate
+GPUFLAGS ?= -stdpar=gpu -mp=gpu -gpu=mem:separate -Minfo=all
 MCFLAGS  ?= -stdpar=multicore
 
 SRC_GPU    = jik.f90 

@@ -1,5 +1,53 @@
+module aa
+implicit none 
+
+contains 
+
+pure subroutine tridiag_forward_sweep(i, j, nz, dt, a3d, h3d, u, unew, &
+                                  ray, b1, d1, c1)
+   
+   ! Arguments
+   integer, intent(in) :: i, j, nz
+   real(kind=8), intent(in) :: dt
+   real(kind=8), intent(in) :: a3d(:,:,:)
+   real(kind=8), intent(in) :: h3d(:,:,:)
+   real(kind=8), intent(in) :: u(:,:,:)
+   real(kind=8), intent(inout) :: unew(:,:,:)
+   real(kind=8), intent(in) :: ray(:,:)
+   real(kind=8), intent(inout) :: b1(:,:)
+   real(kind=8), intent(inout) :: d1(:,:)
+   real(kind=8), intent(inout) :: c1(:,:,:)
+   
+   ! Local variables
+   integer :: k
+   real(kind=8) :: a_loc, h_loc, ray_loc, b1_loc, d1_loc
+   real(kind=8) :: b_denom, u_prev, u_loc
+   real(kind=8), parameter :: one = 1.0d0
+   
+   do k = 2, nz-1
+      a_loc   = a3d(i,j,k)
+      h_loc   = h3d(i,j,k)
+      ray_loc = ray(i,j)
+      b1_loc  = b1(i,j)
+      d1_loc  = d1(i,j)
+      c1(i,j,k) = dt * a_loc * b1_loc
+      b_denom = h_loc + dt * (ray_loc + a_loc * d1_loc)
+      b1_loc  = one / (b_denom + dt * a3d(i,j,k+1))
+      d1_loc  = b_denom * b1_loc
+      u_prev  = unew(i,j,k-1)
+      u_loc   = (h_loc * u(i,j,k) + dt * a_loc * u_prev) * b1_loc
+      unew(i,j,k) = u_loc
+      b1(i,j) = b1_loc
+      d1(i,j) = d1_loc
+   end do
+   
+end subroutine tridiag_forward_sweep
+
+end module aa
+
   program loop_order_sweep_do_concurrent_tridiag_reuse
   use iso_fortran_env, only: real64
+  use aa
   use omp_lib, only: omp_get_wtime
   implicit none
 
@@ -111,28 +159,35 @@
      call reset_state(nx,ny,nz,u,unew,c1,b1,d1)
      t1 = omp_get_wtime()
      do ii = 1, n_iters
-     do concurrent (j=1:ny, i=1:nx)
-        if (mask(i,j) <= 0.0_real64) cycle
-        do k = 2, nz-1
-           a_loc   = a3d(i,j,k)
-           h_loc   = h3d(i,j,k)
-           ray_loc = ray(i,j)
-           b1_loc  = b1(i,j)
-           d1_loc  = d1(i,j)
+     !!$omp target teams distribute parallel do collapse(2)
+     !!$omp target teams loop collapse(2)
+     !do j = 1, ny 
+     !do i = 1, nx
+     do concurrent (j=1:ny, i=1:nx, mask(i,j)>=0.0_real64) local(b1)
 
-           c1(i,j,k) = dt * a_loc * b1_loc
-
-           b_denom = h_loc + dt * (ray_loc + a_loc * d1_loc)
-           b1_loc  = one / (b_denom + dt * a3d(i,j,k+1))
-           d1_loc  = b_denom * b1_loc
-
-           u_prev  = unew(i,j,k-1)
-           u_loc   = (h_loc * u(i,j,k) + dt * a_loc * u_prev) * b1_loc
-           unew(i,j,k) = u_loc
-
-           b1(i,j) = b1_loc
-           d1(i,j) = d1_loc
-        end do
+     call tridiag_forward_sweep(i, j, nz, dt, a3d, h3d, u, unew, &
+                           ray, b1, d1, c1)
+!        do k = 2, nz-1
+!           a_loc   = a3d(i,j,k)
+!           h_loc   = h3d(i,j,k)
+!           ray_loc = ray(i,j)
+!           b1_loc  = b1(i,j)
+!           d1_loc  = d1(i,j)
+!
+!           c1(i,j,k) = dt * a_loc * b1_loc
+!
+!           b_denom = h_loc + dt * (ray_loc + a_loc * d1_loc)
+!           b1_loc  = one / (b_denom + dt * a3d(i,j,k+1))
+!           d1_loc  = b_denom * b1_loc
+!
+!           u_prev  = unew(i,j,k-1)
+!           u_loc   = (h_loc * u(i,j,k) + dt * a_loc * u_prev) * b1_loc
+!           unew(i,j,k) = u_loc
+!
+!           b1(i,j) = b1_loc
+!           d1(i,j) = d1_loc
+!        end do
+     !end do
      end do
      end do
      t2 = omp_get_wtime()
@@ -165,7 +220,48 @@
      write(*,'(I5,1(",",F12.6))') nz_values(idx), timings(idx,1)
   end do
 print *, "You are confident in your resulst, we didn't check for correctness, just S P E E D"
+
 contains
+
+!pure subroutine tridiag_forward_sweep(i, j, nz, dt, a3d, h3d, u, unew, &
+!                                  ray, b1, d1, c1)
+!   
+!   ! Arguments
+!   integer, intent(in) :: i, j, nz
+!   real(kind=8), intent(in) :: dt
+!   real(kind=8), intent(in) :: a3d(:,:,:)
+!   real(kind=8), intent(in) :: h3d(:,:,:)
+!   real(kind=8), intent(in) :: u(:,:,:)
+!   real(kind=8), intent(inout) :: unew(:,:,:)
+!   real(kind=8), intent(in) :: ray(:,:)
+!   real(kind=8), intent(inout) :: b1(:,:)
+!   real(kind=8), intent(inout) :: d1(:,:)
+!   real(kind=8), intent(inout) :: c1(:,:,:)
+!   
+!   ! Local variables
+!   integer :: k
+!   real(kind=8) :: a_loc, h_loc, ray_loc, b1_loc, d1_loc
+!   real(kind=8) :: b_denom, u_prev, u_loc
+!   real(kind=8), parameter :: one = 1.0d0
+!   
+!   do k = 2, nz-1
+!      a_loc   = a3d(i,j,k)
+!      h_loc   = h3d(i,j,k)
+!      ray_loc = ray(i,j)
+!      b1_loc  = b1(i,j)
+!      d1_loc  = d1(i,j)
+!      c1(i,j,k) = dt * a_loc * b1_loc
+!      b_denom = h_loc + dt * (ray_loc + a_loc * d1_loc)
+!      b1_loc  = one / (b_denom + dt * a3d(i,j,k+1))
+!      d1_loc  = b_denom * b1_loc
+!      u_prev  = unew(i,j,k-1)
+!      u_loc   = (h_loc * u(i,j,k) + dt * a_loc * u_prev) * b1_loc
+!      unew(i,j,k) = u_loc
+!      b1(i,j) = b1_loc
+!      d1(i,j) = d1_loc
+!   end do
+!   
+!end subroutine tridiag_forward_sweep
 
   subroutine reset_state(nx,ny,nz,u,unew,c1,b1,d1)
     integer, intent(in) :: nx, ny, nz

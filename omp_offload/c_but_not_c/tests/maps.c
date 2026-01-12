@@ -59,9 +59,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    size_t n = (size_t)N * N;
-    printf("Array size: %d x %d = %zu elements (%.2f MB per array)\n", 
-           N, N, n, (double)(n * sizeof(double)) / (1024 * 1024));
+    size_t n = (size_t)N;
+    printf("Array size: %d = %zu elements (%.2f MB per array)\n", 
+           N, n, (double)(n * sizeof(double)) / (1024 * 1024));
 
     // idea is to mimic the numpy init in ANUGA
     double* a = NULL;
@@ -81,7 +81,7 @@ int main(int argc, char *argv[]) {
 
     struct domain D;
     D.nrows = N;
-    D.ncols = N;
+    D.ncols = 1;
     // equivalent to get_python_domain_pointers
     D.a = a;
     D.b = b;
