@@ -3,7 +3,7 @@ FC = nvfortran
 NVCC = nvcc
 CFLAGS = -mp=gpu,multicore -O3
 FFLAGS = -mp=gpu,multicore -O3
-NVFLAGS = -O3 -arch=native
+NVFLAGS = -O3 -arch=cc70
 
 # Default parameters
 GRID ?= 500
