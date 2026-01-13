@@ -943,7 +943,7 @@ int main(int argc, char *argv[]) {
 
     // Each rank uses its own GPU (modulo num_devices for oversubscription)
     int num_devices = omp_get_num_devices();
-    int my_device = 1;//mpi_rank % num_devices;
+    int my_device = mpi_rank % num_devices;
     omp_set_default_device(my_device);
 
     if (argc < 2 || argc > 7) {
