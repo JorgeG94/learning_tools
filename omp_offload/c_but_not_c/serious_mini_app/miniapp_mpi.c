@@ -8,7 +8,7 @@
 #include <math.h>
 #include <omp.h>
 #include <mpi.h>
-#include <caliper/cali.h>
+//#include <caliper/cali.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -1074,48 +1074,54 @@ static void apply_tide_gpu(struct domain *D, struct delta_config *cfg,
     }
 }
 
+// Precompute river inlet area (call once at setup)
+static double compute_river_area(struct domain *D, struct delta_config *cfg, int *n_cells) {
+    int n = D->number_of_elements;
+    double L = D->domain_length;
+    double inlet_zone = 0.95 * L;
+    double channel_center = 0.5 * L;
+    double channel_hw = cfg->channel_width * L / 2.0;
+
+    double local_area = 0.0;
+    int local_count = 0;
+    for (int k = 0; k < n; k++) {
+        double x = D->centroid_x[k];
+        double y = D->centroid_y[k];
+        if (y > inlet_zone && fabs(x - channel_center) < channel_hw) {
+            local_area += D->areas[k];
+            local_count++;
+        }
+    }
+
+    double global_area;
+    int global_count;
+    MPI_Allreduce(&local_area, &global_area, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(&local_count, &global_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    *n_cells = global_count;
+    return global_area;
+}
+
 // Apply river discharge at inlet (y > threshold, in channel)
+// river_area should be precomputed once at setup
 static void apply_river_discharge_gpu(struct domain *D, struct delta_config *cfg,
-                                       double dt, int *n_river_cells) {
-    if (!cfg->enabled || cfg->river_discharge == 0.0) return;
+                                       double dt, double river_area) {
+    if (!cfg->enabled || cfg->river_discharge == 0.0 || river_area < 1.0e-10) return;
 
     int n = D->number_of_elements;
     double L = D->domain_length;
-    double inlet_zone = 0.95 * L;  // River inlet in last 5% of domain
+    double inlet_zone = 0.95 * L;
     double channel_center = 0.5 * L;
     double channel_hw = cfg->channel_width * L / 2.0;
 
     double *stage_c = D->stage_centroid_values;
-    double *xmom_c = D->xmom_centroid_values;
-    double *ymom_c = D->ymom_centroid_values;
     double *bed_c = D->bed_centroid_values;
     double *height_c = D->height_centroid_values;
+    double *ymom_c = D->ymom_centroid_values;
     double *cx = D->centroid_x;
     double *cy = D->centroid_y;
-    double *areas = D->areas;
 
-    // Count river cells and compute total area (done on CPU for simplicity)
-    // In production, you'd do this once at setup
-    double total_river_area = 0.0;
-    int count = 0;
-    for (int k = 0; k < n; k++) {
-        if (cy[k] > inlet_zone && fabs(cx[k] - channel_center) < channel_hw) {
-            total_river_area += areas[k];
-            count++;
-        }
-    }
-
-    // Gather total across MPI ranks
-    double global_river_area;
-    int global_count;
-    MPI_Allreduce(&total_river_area, &global_river_area, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(&count, &global_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-    *n_river_cells = global_count;
-
-    if (global_river_area < 1.0e-10) return;
-
-    // Discharge per unit area (m/s equivalent depth increase)
-    double discharge_per_area = cfg->river_discharge / global_river_area;
+    // Precomputed: discharge per unit area (m/s equivalent depth increase)
+    double discharge_per_area = cfg->river_discharge / river_area;
     double momentum_per_area = discharge_per_area * cfg->river_velocity;
 
     #pragma omp target teams distribute parallel for
@@ -1160,7 +1166,7 @@ int main(int argc, char *argv[]) {
     int num_devices = omp_get_num_devices();
     int my_device = mpi_rank % num_devices;
     omp_set_default_device(my_device);
-    CALI_MARK_BEGIN("main func");
+    //CALI_MARK_BEGIN("main func");
 
     if (argc < 2 || argc > 8) {
         if (mpi_rank == 0) {
@@ -1208,9 +1214,9 @@ int main(int argc, char *argv[]) {
 
     int n_global = 2 * (grid_size - 1) * (grid_size - 1);
     int local_start, local_n;
-    CALI_MARK_BEGIN("compute_partition");
+    //CALI_MARK_BEGIN("compute_partition");
     compute_partition(n_global, mpi_size, mpi_rank, &local_start, &local_n);
-    CALI_MARK_END("compute_partition");
+    //CALI_MARK_END("compute_partition");
 
     // Compute mesh geometry for reporting
     double dx = domain_length / (grid_size - 1);
@@ -1271,7 +1277,7 @@ int main(int argc, char *argv[]) {
     int n = local_n;
 
     // Allocate arrays
-    CALI_MARK_BEGIN("memory allocation");
+    //CALI_MARK_BEGIN("memory allocation");
     D.stage_centroid_values = (double *)malloc(n * sizeof(double));
     D.xmom_centroid_values = (double *)malloc(n * sizeof(double));
     D.ymom_centroid_values = (double *)malloc(n * sizeof(double));
@@ -1320,13 +1326,13 @@ int main(int argc, char *argv[]) {
     out.stage_edge = (double *)malloc(3 * n * sizeof(double));
     out.height_edge = (double *)malloc(3 * n * sizeof(double));
     out.max_speed_elem = (double *)malloc(n * sizeof(double));
-    CALI_MARK_END("memory allocation");
+    //CALI_MARK_END("memory allocation");
 
     // Initialize
-    CALI_MARK_BEGIN("generate mesh and init quantities");
+    //CALI_MARK_BEGIN("generate mesh and init quantities");
     generate_mesh_local(&D, grid_size);
     init_quantities(&D, initial_height, &delta_cfg);
-    CALI_MARK_END("generate mesh and init quantities");
+    //CALI_MARK_END("generate mesh and init quantities");
 
     // Count wet/dry cells for delta mode
     int local_wet = 0, local_dry = 0;
@@ -1341,10 +1347,18 @@ int main(int argc, char *argv[]) {
     MPI_Reduce(&local_wet, &global_wet, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Reduce(&local_dry, &global_dry, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 
+    // Precompute river area for delta mode
+    int n_river_cells = 0;
+    double river_area = 0.0;
+    if (delta_cfg.enabled) {
+        river_area = compute_river_area(&D, &delta_cfg, &n_river_cells);
+    }
+
     if (mpi_rank == 0 && delta_cfg.enabled) {
         printf("Initial cell states:\n");
         printf("  Wet cells:        %d (%.1f%%)\n", global_wet, 100.0 * global_wet / n_global);
-        printf("  Dry cells:        %d (%.1f%%)\n\n", global_dry, 100.0 * global_dry / n_global);
+        printf("  Dry cells:        %d (%.1f%%)\n", global_dry, 100.0 * global_dry / n_global);
+        printf("  River inlet:      %d cells, %.0f m^2 area\n\n", n_river_cells, river_area);
     }
 
     // Build halo exchange info
@@ -1354,7 +1368,7 @@ int main(int argc, char *argv[]) {
     MPI_Barrier(MPI_COMM_WORLD);
 
     // Map to GPU
-    CALI_MARK_BEGIN("memory transfer to the device");
+    //CALI_MARK_BEGIN("memory transfer to the device");
     #pragma omp target enter data map(to: D.stage_centroid_values[0:n], \
         D.xmom_centroid_values[0:n], D.ymom_centroid_values[0:n], \
         D.bed_centroid_values[0:n], D.height_centroid_values[0:n], \
@@ -1368,7 +1382,7 @@ int main(int argc, char *argv[]) {
         D.edge_midpoint_x[0:3*n], D.edge_midpoint_y[0:3*n], \
         D.neighbours[0:3*n], D.neighbour_owners[0:3*n], D.edgelengths[0:3*n], \
         D.normals[0:6*n], D.areas[0:n], D.radii[0:n], D.max_speed[0:n])
-    CALI_MARK_END("memory transfer to the device");
+    //CALI_MARK_END("memory transfer to the device");
 
     // Run benchmark
     double sim_time = 0.0;
@@ -1382,7 +1396,7 @@ int main(int argc, char *argv[]) {
     MPI_Barrier(MPI_COMM_WORLD);
     double t0 = omp_get_wtime();
 
-    CALI_MARK_BEGIN("main iter loop");
+    //CALI_MARK_BEGIN("main iter loop");
     for (int iter = 0; iter < niter; iter++) {
         compute_gradients_gpu(&D);
         extrapolate_second_order_gpu(&D);
@@ -1403,10 +1417,9 @@ int main(int argc, char *argv[]) {
         update_gpu(&D, dt);
 
         // Apply source terms for delta mode
-        int n_river_cells = 0;
         if (delta_cfg.enabled) {
             apply_tide_gpu(&D, &delta_cfg, sim_time);
-            apply_river_discharge_gpu(&D, &delta_cfg, dt, &n_river_cells);
+            apply_river_discharge_gpu(&D, &delta_cfg, dt, river_area);
             apply_rain_gpu(&D, &delta_cfg, dt);
         }
 
@@ -1424,12 +1437,12 @@ int main(int argc, char *argv[]) {
     }
 
     MPI_Barrier(MPI_COMM_WORLD);
-    CALI_MARK_END("main iter loop");
+    //CALI_MARK_END("main iter loop");
     double t_compute_total = omp_get_wtime() - t0;
     double t_compute_pure = t_compute_total - t_transfer;
 
     // Cleanup GPU
-    CALI_MARK_BEGIN("cleanup of PGU mem");
+    //CALI_MARK_BEGIN("cleanup of PGU mem");
     #pragma omp target exit data map(delete: D.stage_centroid_values[0:n], \
         D.xmom_centroid_values[0:n], D.ymom_centroid_values[0:n], \
         D.bed_centroid_values[0:n], D.height_centroid_values[0:n], \
@@ -1443,7 +1456,7 @@ int main(int argc, char *argv[]) {
         D.edge_midpoint_x[0:3*n], D.edge_midpoint_y[0:3*n], \
         D.neighbours[0:3*n], D.neighbour_owners[0:3*n], D.edgelengths[0:3*n], \
         D.normals[0:6*n], D.areas[0:n], D.radii[0:n], D.max_speed[0:n])
-    CALI_MARK_END("cleanup of PGU mem");
+    //CALI_MARK_END("cleanup of PGU mem");
 
     // Results
     if (mpi_rank == 0) {
@@ -1508,6 +1521,6 @@ int main(int argc, char *argv[]) {
     free(D.areas); free(D.radii); free(D.max_speed);
 
     MPI_Finalize();
-    CALI_MARK_END("main func");
+    //CALI_MARK_END("main func");
     return 0;
 }
