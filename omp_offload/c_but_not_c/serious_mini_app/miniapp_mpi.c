@@ -1,5 +1,6 @@
 // sw_cfl2_mpi.c - Shallow water mini app with MPI + OpenMP target offload
 // Second-order extrapolation + HLL flux + domain decomposition
+// Now with river delta mode: bathymetry, tide, river discharge, rain
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +9,10 @@
 #include <omp.h>
 #include <mpi.h>
 #include <caliper/cali.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 struct domain {
     int number_of_elements;      // Local elements on this rank
@@ -102,6 +107,29 @@ struct verbose_output {
 
 // MPI globals
 static int mpi_rank, mpi_size;
+
+// Delta configuration
+struct delta_config {
+    int enabled;
+
+    // Bathymetry
+    double ocean_depth;       // Depth at ocean side (m)
+    double land_height;       // Max land elevation (m)
+    double channel_depth;     // River channel depth below land (m)
+    double channel_width;     // River channel width (fraction of domain, 0-1)
+
+    // Tide
+    double tide_amplitude;    // Tidal amplitude (m)
+    double tide_period;       // Tidal period (s), ~12.4 hrs for semi-diurnal
+    double mean_sea_level;    // Mean sea level (m)
+
+    // River discharge
+    double river_discharge;   // Total discharge (m³/s)
+    double river_velocity;    // Inflow velocity (m/s)
+
+    // Rain
+    double rain_rate;         // Rain rate (m/s), e.g., 50mm/hr = 1.4e-5 m/s
+};
 
 static void print_progress(int current, int total, double elapsed, double sim_time, int yields) {
     if (mpi_rank != 0) return;
@@ -357,14 +385,92 @@ static void generate_mesh_local(struct domain *D, int grid_size) {
     }
 }
 
-static void init_quantities(struct domain *D, double initial_height) {
+// Compute delta bathymetry for a cell
+// Layout: Ocean at y=0, river inlet at y=domain_length, land in between
+static double compute_delta_bed(double x, double y, double domain_length,
+                                 struct delta_config *cfg) {
+    double L = domain_length;
+
+    // Normalized coordinates (0 to 1)
+    double xn = x / L;
+    double yn = y / L;
+
+    // River channel: runs from north (y=L) toward south, centered at x=0.5
+    double channel_center = 0.5;
+    double channel_hw = cfg->channel_width / 2.0;  // half-width
+    int in_channel = (fabs(xn - channel_center) < channel_hw);
+
+    // Base topography: rises from ocean (y=0) to peak at y=0.6L, then drops to river
+    double topo;
+    if (yn < 0.1) {
+        // Ocean zone: flat at -ocean_depth
+        topo = -cfg->ocean_depth;
+    } else if (yn < 0.5) {
+        // Transition from ocean to land
+        double t = (yn - 0.1) / 0.4;  // 0 to 1
+        topo = -cfg->ocean_depth + (cfg->land_height + cfg->ocean_depth) * t * t;
+    } else if (yn < 0.7) {
+        // Land plateau with some variation
+        double noise = 0.3 * sin(xn * 12.0) * sin(yn * 8.0);  // Small undulation
+        topo = cfg->land_height * (1.0 + noise * 0.2);
+    } else {
+        // Slope down toward river inlet
+        double t = (yn - 0.7) / 0.3;  // 0 to 1
+        topo = cfg->land_height * (1.0 - t * 0.5);
+    }
+
+    // Carve river channel
+    if (in_channel && yn > 0.3) {
+        // Channel gets deeper toward the inlet
+        double channel_factor = (yn - 0.3) / 0.7;  // 0 at y=0.3, 1 at y=1
+        double channel_bed = topo - cfg->channel_depth * channel_factor;
+        // Smooth transition at channel edges
+        double edge_dist = fabs(xn - channel_center) / channel_hw;
+        double blend = edge_dist * edge_dist;  // Parabolic channel cross-section
+        topo = channel_bed + (topo - channel_bed) * blend;
+    }
+
+    // Add some delta distributary channels near the ocean
+    if (yn < 0.4 && yn > 0.1) {
+        double dist1 = fabs(xn - 0.3);
+        double dist2 = fabs(xn - 0.7);
+        if (dist1 < 0.05) {
+            topo -= cfg->channel_depth * 0.5 * (1.0 - dist1/0.05) * (0.4 - yn) / 0.3;
+        }
+        if (dist2 < 0.05) {
+            topo -= cfg->channel_depth * 0.5 * (1.0 - dist2/0.05) * (0.4 - yn) / 0.3;
+        }
+    }
+
+    return topo;
+}
+
+static void init_quantities(struct domain *D, double initial_height,
+                            struct delta_config *cfg) {
     int n = D->number_of_elements;
+    double L = D->domain_length;
 
     #pragma omp parallel for
     for (int k = 0; k < n; k++) {
-        D->bed_centroid_values[k] = 0.0;
-        D->stage_centroid_values[k] = initial_height;
-        D->height_centroid_values[k] = initial_height;
+        double x = D->centroid_x[k];
+        double y = D->centroid_y[k];
+
+        double bed;
+        double stage;
+
+        if (cfg->enabled) {
+            // Delta bathymetry
+            bed = compute_delta_bed(x, y, L, cfg);
+            stage = cfg->mean_sea_level;  // Initial water at mean sea level
+        } else {
+            // Original flat bottom
+            bed = 0.0;
+            stage = initial_height;
+        }
+
+        D->bed_centroid_values[k] = bed;
+        D->stage_centroid_values[k] = stage;
+        D->height_centroid_values[k] = fmax(stage - bed, 0.0);
         D->xmom_centroid_values[k] = 0.0;
         D->ymom_centroid_values[k] = 0.0;
         D->stage_explicit_update[k] = 0.0;
@@ -381,9 +487,10 @@ static void init_quantities(struct domain *D, double initial_height) {
         D->height_x_gradient[k] = 0.0;
         D->height_y_gradient[k] = 0.0;
 
+        double h = D->height_centroid_values[k];
         for (int i = 0; i < 3; i++) {
-            D->stage_edge_values[3*k + i] = initial_height;
-            D->height_edge_values[3*k + i] = initial_height;
+            D->stage_edge_values[3*k + i] = stage;
+            D->height_edge_values[3*k + i] = h;
             D->xmom_edge_values[3*k + i] = 0.0;
             D->ymom_edge_values[3*k + i] = 0.0;
         }
@@ -937,6 +1044,113 @@ static void update_gpu(struct domain *D, double dt) {
     }
 }
 
+// Apply tidal boundary condition at ocean (y < threshold)
+static void apply_tide_gpu(struct domain *D, struct delta_config *cfg,
+                           double sim_time) {
+    if (!cfg->enabled || cfg->tide_amplitude == 0.0) return;
+
+    int n = D->number_of_elements;
+    double L = D->domain_length;
+    double tide_zone = 0.05 * L;  // Apply tide in first 5% of domain
+
+    double *stage_c = D->stage_centroid_values;
+    double *bed_c = D->bed_centroid_values;
+    double *height_c = D->height_centroid_values;
+    double *cy = D->centroid_y;
+
+    double tide_level = cfg->mean_sea_level +
+                        cfg->tide_amplitude * sin(2.0 * M_PI * sim_time / cfg->tide_period);
+
+    #pragma omp target teams distribute parallel for
+    for (int k = 0; k < n; k++) {
+        if (cy[k] < tide_zone) {
+            // Relaxation toward tidal level (soft boundary)
+            double relax = 1.0 - cy[k] / tide_zone;  // 1 at y=0, 0 at y=tide_zone
+            relax = relax * relax;  // Stronger near boundary
+            double target = tide_level;
+            stage_c[k] = stage_c[k] + 0.5 * relax * (target - stage_c[k]);
+            height_c[k] = fmax(stage_c[k] - bed_c[k], 0.0);
+        }
+    }
+}
+
+// Apply river discharge at inlet (y > threshold, in channel)
+static void apply_river_discharge_gpu(struct domain *D, struct delta_config *cfg,
+                                       double dt, int *n_river_cells) {
+    if (!cfg->enabled || cfg->river_discharge == 0.0) return;
+
+    int n = D->number_of_elements;
+    double L = D->domain_length;
+    double inlet_zone = 0.95 * L;  // River inlet in last 5% of domain
+    double channel_center = 0.5 * L;
+    double channel_hw = cfg->channel_width * L / 2.0;
+
+    double *stage_c = D->stage_centroid_values;
+    double *xmom_c = D->xmom_centroid_values;
+    double *ymom_c = D->ymom_centroid_values;
+    double *bed_c = D->bed_centroid_values;
+    double *height_c = D->height_centroid_values;
+    double *cx = D->centroid_x;
+    double *cy = D->centroid_y;
+    double *areas = D->areas;
+
+    // Count river cells and compute total area (done on CPU for simplicity)
+    // In production, you'd do this once at setup
+    double total_river_area = 0.0;
+    int count = 0;
+    for (int k = 0; k < n; k++) {
+        if (cy[k] > inlet_zone && fabs(cx[k] - channel_center) < channel_hw) {
+            total_river_area += areas[k];
+            count++;
+        }
+    }
+
+    // Gather total across MPI ranks
+    double global_river_area;
+    int global_count;
+    MPI_Allreduce(&total_river_area, &global_river_area, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(&count, &global_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    *n_river_cells = global_count;
+
+    if (global_river_area < 1.0e-10) return;
+
+    // Discharge per unit area (m/s equivalent depth increase)
+    double discharge_per_area = cfg->river_discharge / global_river_area;
+    double momentum_per_area = discharge_per_area * cfg->river_velocity;
+
+    #pragma omp target teams distribute parallel for
+    for (int k = 0; k < n; k++) {
+        if (cy[k] > inlet_zone && fabs(cx[k] - channel_center) < channel_hw) {
+            // Add water (mass)
+            stage_c[k] += discharge_per_area * dt;
+            height_c[k] = fmax(stage_c[k] - bed_c[k], 0.0);
+
+            // Add momentum (flowing downstream, negative y direction)
+            ymom_c[k] -= momentum_per_area * dt * height_c[k];
+        }
+    }
+}
+
+// Apply rainfall uniformly
+static void apply_rain_gpu(struct domain *D, struct delta_config *cfg, double dt) {
+    if (!cfg->enabled || cfg->rain_rate == 0.0) return;
+
+    int n = D->number_of_elements;
+
+    double *stage_c = D->stage_centroid_values;
+    double *bed_c = D->bed_centroid_values;
+    double *height_c = D->height_centroid_values;
+
+    double rain_depth = cfg->rain_rate * dt;
+
+    #pragma omp target teams distribute parallel for
+    for (int k = 0; k < n; k++) {
+        // Rain falls everywhere (even on dry cells - they get wet!)
+        stage_c[k] += rain_depth;
+        height_c[k] = fmax(stage_c[k] - bed_c[k], 0.0);
+    }
+}
+
 int main(int argc, char *argv[]) {
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
@@ -948,11 +1162,12 @@ int main(int argc, char *argv[]) {
     omp_set_default_device(my_device);
     CALI_MARK_BEGIN("main func");
 
-    if (argc < 2 || argc > 7) {
+    if (argc < 2 || argc > 8) {
         if (mpi_rank == 0) {
-            fprintf(stderr, "Usage: %s N [niter] [yieldstep] [gather] [domain_km] [depth_m]\n", argv[0]);
+            fprintf(stderr, "Usage: %s N [niter] [yieldstep] [gather] [domain_km] [depth_m] [delta]\n", argv[0]);
             fprintf(stderr, "  MPI + OpenMP target version with yieldstep transfers\n");
             fprintf(stderr, "  gather: 0 = distributed I/O (scalable), 1 = gather to rank 0\n");
+            fprintf(stderr, "  delta:  0 = flat bottom (default), 1 = river delta with tide/rain/discharge\n");
         }
         MPI_Finalize();
         return 1;
@@ -964,6 +1179,26 @@ int main(int argc, char *argv[]) {
     int gather_mode = (argc >= 5) ? atoi(argv[4]) : 0;  // 0 = distributed (default)
     double domain_length = (argc >= 6) ? atof(argv[5]) * 1000.0 : 100000.0;
     double initial_height = (argc >= 7) ? atof(argv[6]) : 10.0;
+    int delta_mode = (argc >= 8) ? atoi(argv[7]) : 0;
+
+    // Set up delta configuration
+    struct delta_config delta_cfg;
+    delta_cfg.enabled = delta_mode;
+
+    // Realistic-ish river delta parameters
+    delta_cfg.ocean_depth = 10.0;          // 10m deep ocean
+    delta_cfg.land_height = 3.0;           // Land rises to 3m above sea level
+    delta_cfg.channel_depth = 5.0;         // River channel 5m deep
+    delta_cfg.channel_width = 0.1;         // Channel is 10% of domain width
+
+    delta_cfg.tide_amplitude = 1.5;        // 1.5m tidal range (3m total)
+    delta_cfg.tide_period = 12.4 * 3600.0; // Semi-diurnal tide (~12.4 hours)
+    delta_cfg.mean_sea_level = 0.0;        // Reference level
+
+    delta_cfg.river_discharge = 1000.0;    // 1000 m³/s (medium-sized river)
+    delta_cfg.river_velocity = 1.5;        // 1.5 m/s inflow velocity
+
+    delta_cfg.rain_rate = 20.0e-3 / 3600.0; // 20 mm/hr (heavy rain)
 
     if (grid_size < 3) {
         if (mpi_rank == 0) fprintf(stderr, "Error: Grid size must be at least 3\n");
@@ -999,6 +1234,26 @@ int main(int argc, char *argv[]) {
         printf("Mesh Geometry:\n");
         printf("  Edge length:      %.2f m\n", dx);
         printf("  Triangle area:    %.2f m^2\n\n", triangle_area);
+
+        if (delta_cfg.enabled) {
+            printf("Delta Configuration (ENABLED):\n");
+            printf("  Bathymetry:\n");
+            printf("    Ocean depth:    %.1f m\n", delta_cfg.ocean_depth);
+            printf("    Land height:    %.1f m above MSL\n", delta_cfg.land_height);
+            printf("    Channel depth:  %.1f m\n", delta_cfg.channel_depth);
+            printf("    Channel width:  %.0f%% of domain\n", delta_cfg.channel_width * 100);
+            printf("  Tide:\n");
+            printf("    Amplitude:      %.2f m (%.2f m range)\n",
+                   delta_cfg.tide_amplitude, 2*delta_cfg.tide_amplitude);
+            printf("    Period:         %.2f hours\n", delta_cfg.tide_period / 3600.0);
+            printf("  River:\n");
+            printf("    Discharge:      %.0f m^3/s\n", delta_cfg.river_discharge);
+            printf("    Velocity:       %.1f m/s\n", delta_cfg.river_velocity);
+            printf("  Rain:\n");
+            printf("    Rate:           %.1f mm/hr\n\n", delta_cfg.rain_rate * 3600.0 * 1000.0);
+        } else {
+            printf("Mode: FLAT BOTTOM (uniform depth)\n\n");
+        }
     }
 
     // Allocate domain
@@ -1070,8 +1325,27 @@ int main(int argc, char *argv[]) {
     // Initialize
     CALI_MARK_BEGIN("generate mesh and init quantities");
     generate_mesh_local(&D, grid_size);
-    init_quantities(&D, initial_height);
+    init_quantities(&D, initial_height, &delta_cfg);
     CALI_MARK_END("generate mesh and init quantities");
+
+    // Count wet/dry cells for delta mode
+    int local_wet = 0, local_dry = 0;
+    for (int k = 0; k < n; k++) {
+        if (D.height_centroid_values[k] > D.minimum_allowed_height) {
+            local_wet++;
+        } else {
+            local_dry++;
+        }
+    }
+    int global_wet, global_dry;
+    MPI_Reduce(&local_wet, &global_wet, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_dry, &global_dry, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    if (mpi_rank == 0 && delta_cfg.enabled) {
+        printf("Initial cell states:\n");
+        printf("  Wet cells:        %d (%.1f%%)\n", global_wet, 100.0 * global_wet / n_global);
+        printf("  Dry cells:        %d (%.1f%%)\n\n", global_dry, 100.0 * global_dry / n_global);
+    }
 
     // Build halo exchange info
     struct halo_info halo;
@@ -1127,6 +1401,15 @@ int main(int argc, char *argv[]) {
 
         protect_gpu(&D);
         update_gpu(&D, dt);
+
+        // Apply source terms for delta mode
+        int n_river_cells = 0;
+        if (delta_cfg.enabled) {
+            apply_tide_gpu(&D, &delta_cfg, sim_time);
+            apply_river_discharge_gpu(&D, &delta_cfg, dt, &n_river_cells);
+            apply_rain_gpu(&D, &delta_cfg, dt);
+        }
+
         sim_time += dt;
 
         // Yieldstep transfer
