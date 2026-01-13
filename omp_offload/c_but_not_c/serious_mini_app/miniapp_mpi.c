@@ -977,6 +977,10 @@ int main(int argc, char *argv[]) {
     compute_partition(n_global, mpi_size, mpi_rank, &local_start, &local_n);
     CALI_MARK_END("compute_partition");
 
+    // Compute mesh geometry for reporting
+    double dx = domain_length / (grid_size - 1);
+    double triangle_area = 0.5 * dx * dx;  // Right triangle with legs dx
+
     if (mpi_rank == 0) {
         printf("============================================================\n");
         printf("  SHALLOW WATER - MPI + OpenMP Target (HLL Flux)\n");
@@ -992,6 +996,9 @@ int main(int argc, char *argv[]) {
         printf("  Iterations:       %d\n", niter);
         printf("  Yieldstep:        %d\n", yieldstep);
         printf("  I/O mode:         %s\n\n", gather_mode ? "GATHER (rank 0)" : "DISTRIBUTED (scalable)");
+        printf("Mesh Geometry:\n");
+        printf("  Edge length:      %.2f m\n", dx);
+        printf("  Triangle area:    %.2f m^2\n\n", triangle_area);
     }
 
     // Allocate domain
@@ -1165,7 +1172,7 @@ int main(int argc, char *argv[]) {
         double time_per_step = t_compute_total / (double)niter;
         double steps_per_second = 1.0 / time_per_step;
         dt = sim_time / (double)niter;
-        double target_time = 2.0 * 24.0 * 3600.0;
+        double target_time = 3.5 * 24.0 * 3600.0;
         double estimated_steps = target_time / dt;
         double estimated_wallclock = estimated_steps * time_per_step;
 

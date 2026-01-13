@@ -6,7 +6,7 @@ MPICXX = mpicxx
 # Caliper
 CALIPER_ROOT ?= $(CALIPER_ROOT)
 CALIPER_INC  = -I$(CALIPER_ROOT)/include
-CALIPER_LIB  = -L$(CALIPER_ROOT)/lib64
+CALIPER_LIB  = -L$(CALIPER_ROOT)/lib
 CALIPER_LDLIBS = -lcaliper
 
 CFLAGS = -mp=gpu,multicore -O3 -gpu=cc70 $(CALIPER_INC)
