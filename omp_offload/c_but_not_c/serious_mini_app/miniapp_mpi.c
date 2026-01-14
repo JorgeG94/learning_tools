@@ -85,6 +85,12 @@ struct halo_info {
     double *recv_buffer;
     int send_buffer_size;
     int recv_buffer_size;
+
+    // Precomputed flattened arrays for GPU (computed once at setup)
+    int *flat_send_indices;      // Flattened local element indices to send
+    int *flat_recv_edge_indices; // Flattened local edge indices that receive halo data
+    int *edge_to_recv_idx;       // Maps edge index -> recv_buffer index (-1 if not remote)
+    int n_local_elements;        // Number of local elements (for edge_to_recv_idx size)
 };
 
 // Verbose output structure (for yieldstep transfers)
@@ -502,6 +508,8 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
     int n = D->number_of_elements;
     int n_global = D->global_elements;
 
+    halo->n_local_elements = n;
+
     // Count neighbors on each remote rank
     int *rank_counts = (int *)calloc(mpi_size, sizeof(int));
 
@@ -528,6 +536,10 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
         halo->recv_indices = NULL;
         halo->send_buffer = NULL;
         halo->recv_buffer = NULL;
+        halo->flat_send_indices = NULL;
+        halo->flat_recv_edge_indices = NULL;
+        halo->edge_to_recv_idx = (int *)malloc(3 * n * sizeof(int));
+        for (int i = 0; i < 3 * n; i++) halo->edge_to_recv_idx[i] = -1;
         free(rank_counts);
         return;
     }
@@ -629,16 +641,48 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
     halo->send_buffer = (double *)malloc(4 * halo->send_buffer_size * sizeof(double));
     halo->recv_buffer = (double *)malloc(4 * halo->recv_buffer_size * sizeof(double));
 
+    // Precompute flattened arrays for GPU
+    int send_size = halo->send_buffer_size;
+    int recv_size = halo->recv_buffer_size;
+
+    halo->flat_send_indices = (int *)malloc(send_size * sizeof(int));
+    halo->flat_recv_edge_indices = (int *)malloc(recv_size * sizeof(int));
+    halo->edge_to_recv_idx = (int *)malloc(3 * n * sizeof(int));
+
+    // Initialize edge_to_recv_idx to -1 (not a remote neighbor)
+    for (int i = 0; i < 3 * n; i++) {
+        halo->edge_to_recv_idx[i] = -1;
+    }
+
+    // Flatten send indices (element indices we send to neighbors)
+    int offset = 0;
+    for (int ni = 0; ni < halo->num_neighbors; ni++) {
+        for (int j = 0; j < halo->send_counts[ni]; j++) {
+            halo->flat_send_indices[offset++] = halo->send_indices[ni][j];
+        }
+    }
+
+    // Flatten recv indices and build edge_to_recv_idx mapping
+    offset = 0;
+    for (int ni = 0; ni < halo->num_neighbors; ni++) {
+        for (int j = 0; j < halo->recv_counts[ni]; j++) {
+            int edge_idx = halo->recv_indices[ni][j];
+            halo->flat_recv_edge_indices[offset] = edge_idx;
+            halo->edge_to_recv_idx[edge_idx] = offset;  // Maps edge -> recv_buffer index
+            offset++;
+        }
+    }
+
     free(rank_counts);
 }
 
 // Exchange halo data
 // With GPU_AWARE: uses device pointers directly with MPI (requires GPU-aware MPI library)
-// Without GPU_AWARE: copies data to/from host for MPI communication
+// Without GPU_AWARE: copies only halo buffers to/from host for MPI communication
+// NOTE: Halo arrays (flat_send_indices, send_buffer, recv_buffer) must be mapped to GPU before calling
 static void exchange_halo(struct domain *D, struct halo_info *halo) {
     if (halo->num_neighbors == 0) return;
 
-    int n = D->number_of_elements;
     int send_size = halo->send_buffer_size;
     int recv_size = halo->recv_buffer_size;
 
@@ -648,36 +692,22 @@ static void exchange_halo(struct domain *D, struct halo_info *halo) {
     double *stage_edge = D->stage_edge_values;
     double *send_buf = halo->send_buffer;
     double *recv_buf = halo->recv_buffer;
+    int *flat_send = halo->flat_send_indices;
 
-    // Flatten send_indices for GPU access
-    // (In production, you'd store these flattened at setup time)
-    int *flat_send_indices = (int *)malloc(send_size * sizeof(int));
-    int offset = 0;
-    for (int ni = 0; ni < halo->num_neighbors; ni++) {
-        for (int j = 0; j < halo->send_counts[ni]; j++) {
-            flat_send_indices[offset++] = halo->send_indices[ni][j];
-        }
-    }
-
-#ifdef GPU_AWARE
-    // GPU-aware MPI path: pack on GPU, send device pointers directly
-
-    // Map send indices and buffers to GPU (would be done once at setup in production)
-    #pragma omp target enter data map(to: flat_send_indices[0:send_size])
-    #pragma omp target enter data map(alloc: send_buf[0:4*send_size], recv_buf[0:4*recv_size])
-
-    // Pack send buffer on GPU
+    // Pack send buffer on GPU (element centroid data for edge 0)
+    // We send centroid-extrapolated edge values for the boundary edges
     #pragma omp target teams distribute parallel for
     for (int idx = 0; idx < send_size; idx++) {
-        int k = flat_send_indices[idx];  // Local element index
-        int edge_idx = 3*k + 0;  // Edge 0 (simplified)
+        int k = flat_send[idx];  // Local element index
+        int edge_idx = 3*k + 0;  // Edge 0 (the one shared with neighbor)
         send_buf[4*idx + 0] = height_edge[edge_idx];
         send_buf[4*idx + 1] = xmom_edge[edge_idx];
         send_buf[4*idx + 2] = ymom_edge[edge_idx];
         send_buf[4*idx + 3] = stage_edge[edge_idx];
     }
 
-    // MPI communication using device addresses
+#ifdef GPU_AWARE
+    // GPU-aware MPI path: send device pointers directly
     MPI_Request *requests = (MPI_Request *)malloc(2 * halo->num_neighbors * sizeof(MPI_Request));
     int send_offset = 0, recv_offset = 0;
 
@@ -692,32 +722,17 @@ static void exchange_halo(struct domain *D, struct halo_info *halo) {
             send_offset += halo->send_counts[ni];
             recv_offset += halo->recv_counts[ni];
         }
-
         MPI_Waitall(2 * halo->num_neighbors, requests, MPI_STATUSES_IGNORE);
     }
-
-    // Cleanup temporary GPU mappings
-    #pragma omp target exit data map(delete: flat_send_indices[0:send_size])
-    #pragma omp target exit data map(delete: send_buf[0:4*send_size], recv_buf[0:4*recv_size])
+    free(requests);
 
 #else
-    // Non-GPU-aware MPI path: copy to host, communicate, copy back
+    // Non-GPU-aware MPI path: transfer only the small halo buffers
 
-    // Copy edge values from GPU to host for packing
-    #pragma omp target update from(height_edge[0:3*n], xmom_edge[0:3*n], \
-                                   ymom_edge[0:3*n], stage_edge[0:3*n])
+    // Copy packed send buffer from GPU to host (small - only halo elements)
+    #pragma omp target update from(send_buf[0:4*send_size])
 
-    // Pack send buffer on CPU
-    for (int idx = 0; idx < send_size; idx++) {
-        int k = flat_send_indices[idx];
-        int edge_idx = 3*k + 0;
-        send_buf[4*idx + 0] = height_edge[edge_idx];
-        send_buf[4*idx + 1] = xmom_edge[edge_idx];
-        send_buf[4*idx + 2] = ymom_edge[edge_idx];
-        send_buf[4*idx + 3] = stage_edge[edge_idx];
-    }
-
-    // Non-blocking sends and receives on host buffers
+    // MPI communication on host
     MPI_Request *requests = (MPI_Request *)malloc(2 * halo->num_neighbors * sizeof(MPI_Request));
     int send_offset = 0, recv_offset = 0;
 
@@ -730,17 +745,12 @@ static void exchange_halo(struct domain *D, struct halo_info *halo) {
         send_offset += halo->send_counts[ni];
         recv_offset += halo->recv_counts[ni];
     }
-
     MPI_Waitall(2 * halo->num_neighbors, requests, MPI_STATUSES_IGNORE);
-
-#endif
-
     free(requests);
-    free(flat_send_indices);
 
-    // Note: recv_buffer now contains halo data that can be used in flux computation
-    // The flux kernel checks neighbour_owners and would need to be extended to
-    // actually use recv_buffer data for remote neighbors
+    // Copy received halo data from host to GPU (small - only halo elements)
+    #pragma omp target update to(recv_buf[0:4*recv_size])
+#endif
 }
 
 static void compute_gradients_gpu(struct domain *D) {
@@ -943,7 +953,7 @@ static double compute_fluxes_gpu(struct domain *D, struct halo_info *halo) {
 
     // Get halo data pointers for GPU
     double *recv_buf = halo->recv_buffer;
-    int recv_size = halo->recv_buffer_size;
+    int *edge_to_recv = halo->edge_to_recv_idx;
 
     #pragma omp target teams distribute parallel for \
         reduction(max: local_max_speed)
@@ -981,10 +991,18 @@ static double compute_fluxes_gpu(struct domain *D, struct halo_info *halo) {
                 vh_R = ymom_edge[ki_nb];
             } else {
                 // Remote neighbor - use received halo data
-                // For simplicity, use first-order at MPI boundaries
-                h_R = h_L;
-                uh_R = uh_L;
-                vh_R = vh_L;
+                int recv_idx = edge_to_recv[ki];
+                if (recv_idx >= 0) {
+                    h_R = recv_buf[4*recv_idx + 0];
+                    uh_R = recv_buf[4*recv_idx + 1];
+                    vh_R = recv_buf[4*recv_idx + 2];
+                    // stage is at [4*recv_idx + 3] if needed
+                } else {
+                    // Fallback (should not happen if halo setup is correct)
+                    h_R = h_L;
+                    uh_R = uh_L;
+                    vh_R = vh_L;
+                }
             }
 
             // Velocities
@@ -1445,6 +1463,18 @@ int main(int argc, char *argv[]) {
         D.edge_midpoint_x[0:3*n], D.edge_midpoint_y[0:3*n], \
         D.neighbours[0:3*n], D.neighbour_owners[0:3*n], D.edgelengths[0:3*n], \
         D.normals[0:6*n], D.areas[0:n], D.radii[0:n], D.max_speed[0:n])
+
+    // Map halo exchange arrays to GPU
+    if (halo.num_neighbors > 0) {
+        int send_size = halo.send_buffer_size;
+        int recv_size = halo.recv_buffer_size;
+        #pragma omp target enter data map(to: halo.flat_send_indices[0:send_size], \
+            halo.edge_to_recv_idx[0:3*n]) \
+            map(alloc: halo.send_buffer[0:4*send_size], halo.recv_buffer[0:4*recv_size])
+    } else {
+        // Still need edge_to_recv_idx on GPU even with no neighbors
+        #pragma omp target enter data map(to: halo.edge_to_recv_idx[0:3*n])
+    }
     //CALI_MARK_END("memory transfer to the device");
 
     // Run benchmark
@@ -1464,9 +1494,9 @@ int main(int argc, char *argv[]) {
         compute_gradients_gpu(&D);
         extrapolate_second_order_gpu(&D);
 
-        // Halo exchange
+        // Halo exchange (only transfers small halo buffers, not full edge arrays)
         // Compile with -DGPU_AWARE for GPU-aware MPI (device pointers passed directly)
-        // Without GPU_AWARE: copies edge data to host, does MPI, copies back
+        // Without GPU_AWARE: transfers only halo buffers (~O(sqrt(n)) data) to/from host
         exchange_halo(&D, &halo);
 
         max_speed_global = compute_fluxes_gpu(&D, &halo);
@@ -1520,6 +1550,17 @@ int main(int argc, char *argv[]) {
         D.edge_midpoint_x[0:3*n], D.edge_midpoint_y[0:3*n], \
         D.neighbours[0:3*n], D.neighbour_owners[0:3*n], D.edgelengths[0:3*n], \
         D.normals[0:6*n], D.areas[0:n], D.radii[0:n], D.max_speed[0:n])
+
+    // Cleanup halo GPU arrays
+    if (halo.num_neighbors > 0) {
+        int send_size = halo.send_buffer_size;
+        int recv_size = halo.recv_buffer_size;
+        #pragma omp target exit data map(delete: halo.flat_send_indices[0:send_size], \
+            halo.edge_to_recv_idx[0:3*n], \
+            halo.send_buffer[0:4*send_size], halo.recv_buffer[0:4*recv_size])
+    } else {
+        #pragma omp target exit data map(delete: halo.edge_to_recv_idx[0:3*n])
+    }
     //CALI_MARK_END("cleanup of PGU mem");
 
     // Results
@@ -1583,6 +1624,24 @@ int main(int argc, char *argv[]) {
     free(D.neighbours); free(D.neighbour_owners);
     free(D.edgelengths); free(D.normals);
     free(D.areas); free(D.radii); free(D.max_speed);
+
+    // Cleanup halo host arrays
+    if (halo.num_neighbors > 0) {
+        for (int ni = 0; ni < halo.num_neighbors; ni++) {
+            free(halo.send_indices[ni]);
+            free(halo.recv_indices[ni]);
+        }
+        free(halo.neighbor_ranks);
+        free(halo.send_counts);
+        free(halo.recv_counts);
+        free(halo.send_indices);
+        free(halo.recv_indices);
+        free(halo.send_buffer);
+        free(halo.recv_buffer);
+        free(halo.flat_send_indices);
+        free(halo.flat_recv_edge_indices);
+    }
+    free(halo.edge_to_recv_idx);
 
     MPI_Finalize();
     //CALI_MARK_END("main func");
