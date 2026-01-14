@@ -1,5 +1,5 @@
 // sw_cfl2_mpi.c - Shallow water mini app with MPI + OpenMP target offload
-// Second-order extrapolation + HLL flux + domain decomposition
+// RK2 time integration + Second-order extrapolation + HLL flux + domain decomposition
 // Now with river delta mode: bathymetry, tide, river discharge, rain
 
 #include <stdio.h>
@@ -46,6 +46,11 @@ struct domain {
     double *ymom_y_gradient;
     double *height_x_gradient;
     double *height_y_gradient;
+
+    // RK2 backup arrays (for storing Q^n)
+    double *stage_backup;
+    double *xmom_backup;
+    double *ymom_backup;
 
     // Mesh geometry
     double *centroid_x;
@@ -1125,6 +1130,49 @@ static void update_gpu(struct domain *D, double dt) {
     }
 }
 
+// RK2 helper: Save current state to backup arrays
+static void rk2_save_state_gpu(struct domain *D) {
+    int n = D->number_of_elements;
+
+    double *stage_c = D->stage_centroid_values;
+    double *xmom_c = D->xmom_centroid_values;
+    double *ymom_c = D->ymom_centroid_values;
+    double *stage_bk = D->stage_backup;
+    double *xmom_bk = D->xmom_backup;
+    double *ymom_bk = D->ymom_backup;
+
+    #pragma omp target teams distribute parallel for
+    for (int k = 0; k < n; k++) {
+        stage_bk[k] = stage_c[k];
+        xmom_bk[k] = xmom_c[k];
+        ymom_bk[k] = ymom_c[k];
+    }
+}
+
+// RK2 helper: Average current state with backup (Heun's method final step)
+// Q^{n+1} = 0.5 * (Q^n + Q**)
+static void rk2_average_gpu(struct domain *D) {
+    int n = D->number_of_elements;
+
+    double *stage_c = D->stage_centroid_values;
+    double *xmom_c = D->xmom_centroid_values;
+    double *ymom_c = D->ymom_centroid_values;
+    double *bed_c = D->bed_centroid_values;
+    double *height_c = D->height_centroid_values;
+    double *stage_bk = D->stage_backup;
+    double *xmom_bk = D->xmom_backup;
+    double *ymom_bk = D->ymom_backup;
+
+    #pragma omp target teams distribute parallel for
+    for (int k = 0; k < n; k++) {
+        stage_c[k] = 0.5 * (stage_bk[k] + stage_c[k]);
+        xmom_c[k] = 0.5 * (xmom_bk[k] + xmom_c[k]);
+        ymom_c[k] = 0.5 * (ymom_bk[k] + ymom_c[k]);
+        // Recompute height after averaging
+        height_c[k] = fmax(stage_c[k] - bed_c[k], 0.0);
+    }
+}
+
 // Apply tidal boundary condition at ocean (y < threshold)
 static void apply_tide_gpu(struct domain *D, struct delta_config *cfg,
                            double sim_time) {
@@ -1319,7 +1367,7 @@ int main(int argc, char *argv[]) {
 
     if (mpi_rank == 0) {
         printf("============================================================\n");
-        printf("  SHALLOW WATER - MPI + OpenMP Target (HLL Flux)\n");
+        printf("  SHALLOW WATER - MPI + OpenMP Target (RK2 + HLL Flux)\n");
         printf("============================================================\n\n");
         printf("MPI Configuration:\n");
         printf("  Ranks:            %d\n", mpi_size);
@@ -1393,6 +1441,9 @@ int main(int argc, char *argv[]) {
     D.ymom_y_gradient = (double *)malloc(n * sizeof(double));
     D.height_x_gradient = (double *)malloc(n * sizeof(double));
     D.height_y_gradient = (double *)malloc(n * sizeof(double));
+    D.stage_backup = (double *)malloc(n * sizeof(double));
+    D.xmom_backup = (double *)malloc(n * sizeof(double));
+    D.ymom_backup = (double *)malloc(n * sizeof(double));
     D.centroid_x = (double *)malloc(n * sizeof(double));
     D.centroid_y = (double *)malloc(n * sizeof(double));
     D.edge_midpoint_x = (double *)malloc(3 * n * sizeof(double));
@@ -1473,7 +1524,8 @@ int main(int argc, char *argv[]) {
         D.ymom_edge_values[0:3*n], D.stage_x_gradient[0:n], \
         D.stage_y_gradient[0:n], D.xmom_x_gradient[0:n], D.xmom_y_gradient[0:n], \
         D.ymom_x_gradient[0:n], D.ymom_y_gradient[0:n], D.height_x_gradient[0:n], \
-        D.height_y_gradient[0:n], D.centroid_x[0:n], D.centroid_y[0:n], \
+        D.height_y_gradient[0:n], D.stage_backup[0:n], D.xmom_backup[0:n], \
+        D.ymom_backup[0:n], D.centroid_x[0:n], D.centroid_y[0:n], \
         D.edge_midpoint_x[0:3*n], D.edge_midpoint_y[0:3*n], \
         D.neighbours[0:3*n], D.neighbour_owners[0:3*n], D.edgelengths[0:3*n], \
         D.normals[0:6*n], D.areas[0:n], D.radii[0:n], D.max_speed[0:n])
@@ -1505,16 +1557,17 @@ int main(int argc, char *argv[]) {
 
     //CALI_MARK_BEGIN("main iter loop");
     for (int iter = 0; iter < niter; iter++) {
+        // ===== RK2 (Heun's method) =====
+        // Save Q^n for later averaging
+        rk2_save_state_gpu(&D);
+
+        // ----- Stage 1 (predictor): Q* = Q^n + dt * F(Q^n) -----
         compute_gradients_gpu(&D);
         extrapolate_second_order_gpu(&D);
-
-        // Halo exchange (only transfers small halo buffers, not full edge arrays)
-        // Compile with -DGPU_AWARE for GPU-aware MPI (device pointers passed directly)
-        // Without GPU_AWARE: transfers only halo buffers (~O(sqrt(n)) data) to/from host
         exchange_halo(&D, &halo);
-
         max_speed_global = compute_fluxes_gpu(&D, &halo);
 
+        // Compute dt from CFL condition (based on Q^n speeds)
         if (max_speed_global > D.epsilon) {
             dt = D.cfl * D.char_length / max_speed_global;
         } else {
@@ -1522,11 +1575,24 @@ int main(int argc, char *argv[]) {
         }
 
         protect_gpu(&D);
-        update_gpu(&D, dt);
+        update_gpu(&D, dt);  // Q* = Q^n + dt * F(Q^n)
 
-        // Apply source terms for delta mode
+        // ----- Stage 2 (corrector): Q** = Q* + dt * F(Q*) -----
+        compute_gradients_gpu(&D);
+        extrapolate_second_order_gpu(&D);
+        exchange_halo(&D, &halo);
+        compute_fluxes_gpu(&D, &halo);  // Recompute fluxes on Q*
+
+        protect_gpu(&D);
+        update_gpu(&D, dt);  // Q** = Q* + dt * F(Q*)
+
+        // ----- Final: Q^{n+1} = 0.5 * (Q^n + Q**) -----
+        rk2_average_gpu(&D);
+        protect_gpu(&D);
+
+        // Apply source terms (operator split, at new time level)
         if (delta_cfg.enabled) {
-            apply_tide_gpu(&D, &delta_cfg, sim_time);
+            apply_tide_gpu(&D, &delta_cfg, sim_time + dt);
             apply_river_discharge_gpu(&D, &delta_cfg, dt, river_area);
             apply_rain_gpu(&D, &delta_cfg, dt);
         }
@@ -1560,7 +1626,8 @@ int main(int argc, char *argv[]) {
         D.ymom_edge_values[0:3*n], D.stage_x_gradient[0:n], \
         D.stage_y_gradient[0:n], D.xmom_x_gradient[0:n], D.xmom_y_gradient[0:n], \
         D.ymom_x_gradient[0:n], D.ymom_y_gradient[0:n], D.height_x_gradient[0:n], \
-        D.height_y_gradient[0:n], D.centroid_x[0:n], D.centroid_y[0:n], \
+        D.height_y_gradient[0:n], D.stage_backup[0:n], D.xmom_backup[0:n], \
+        D.ymom_backup[0:n], D.centroid_x[0:n], D.centroid_y[0:n], \
         D.edge_midpoint_x[0:3*n], D.edge_midpoint_y[0:3*n], \
         D.neighbours[0:3*n], D.neighbour_owners[0:3*n], D.edgelengths[0:3*n], \
         D.normals[0:6*n], D.areas[0:n], D.radii[0:n], D.max_speed[0:n])
@@ -1633,6 +1700,7 @@ int main(int argc, char *argv[]) {
     free(D.xmom_x_gradient); free(D.xmom_y_gradient);
     free(D.ymom_x_gradient); free(D.ymom_y_gradient);
     free(D.height_x_gradient); free(D.height_y_gradient);
+    free(D.stage_backup); free(D.xmom_backup); free(D.ymom_backup);
     free(D.centroid_x); free(D.centroid_y);
     free(D.edge_midpoint_x); free(D.edge_midpoint_y);
     free(D.neighbours); free(D.neighbour_owners);
