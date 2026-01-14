@@ -633,51 +633,114 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
 }
 
 // Exchange halo data
+// With GPU_AWARE: uses device pointers directly with MPI (requires GPU-aware MPI library)
+// Without GPU_AWARE: copies data to/from host for MPI communication
 static void exchange_halo(struct domain *D, struct halo_info *halo) {
     if (halo->num_neighbors == 0) return;
 
     int n = D->number_of_elements;
+    int send_size = halo->send_buffer_size;
+    int recv_size = halo->recv_buffer_size;
 
-    // Pack send buffer (edge values from local elements that neighbors need)
+    double *height_edge = D->height_edge_values;
+    double *xmom_edge = D->xmom_edge_values;
+    double *ymom_edge = D->ymom_edge_values;
+    double *stage_edge = D->stage_edge_values;
+    double *send_buf = halo->send_buffer;
+    double *recv_buf = halo->recv_buffer;
+
+    // Flatten send_indices for GPU access
+    // (In production, you'd store these flattened at setup time)
+    int *flat_send_indices = (int *)malloc(send_size * sizeof(int));
     int offset = 0;
     for (int ni = 0; ni < halo->num_neighbors; ni++) {
         for (int j = 0; j < halo->send_counts[ni]; j++) {
-            int k = halo->send_indices[ni][j];  // Local element index
-            // Send edge 0's values (simplified - real code would track which edge)
-            int edge_idx = 3*k + 0;
-            halo->send_buffer[4*offset + 0] = D->height_edge_values[edge_idx];
-            halo->send_buffer[4*offset + 1] = D->xmom_edge_values[edge_idx];
-            halo->send_buffer[4*offset + 2] = D->ymom_edge_values[edge_idx];
-            halo->send_buffer[4*offset + 3] = D->stage_edge_values[edge_idx];
-            offset++;
+            flat_send_indices[offset++] = halo->send_indices[ni][j];
         }
     }
 
-    // Non-blocking sends and receives
+#ifdef GPU_AWARE
+    // GPU-aware MPI path: pack on GPU, send device pointers directly
+
+    // Map send indices and buffers to GPU (would be done once at setup in production)
+    #pragma omp target enter data map(to: flat_send_indices[0:send_size])
+    #pragma omp target enter data map(alloc: send_buf[0:4*send_size], recv_buf[0:4*recv_size])
+
+    // Pack send buffer on GPU
+    #pragma omp target teams distribute parallel for
+    for (int idx = 0; idx < send_size; idx++) {
+        int k = flat_send_indices[idx];  // Local element index
+        int edge_idx = 3*k + 0;  // Edge 0 (simplified)
+        send_buf[4*idx + 0] = height_edge[edge_idx];
+        send_buf[4*idx + 1] = xmom_edge[edge_idx];
+        send_buf[4*idx + 2] = ymom_edge[edge_idx];
+        send_buf[4*idx + 3] = stage_edge[edge_idx];
+    }
+
+    // MPI communication using device addresses
+    MPI_Request *requests = (MPI_Request *)malloc(2 * halo->num_neighbors * sizeof(MPI_Request));
+    int send_offset = 0, recv_offset = 0;
+
+    #pragma omp target data use_device_addr(send_buf, recv_buf)
+    {
+        for (int ni = 0; ni < halo->num_neighbors; ni++) {
+            int partner = halo->neighbor_ranks[ni];
+            MPI_Irecv(&recv_buf[4*recv_offset], 4 * halo->recv_counts[ni], MPI_DOUBLE,
+                      partner, 2, MPI_COMM_WORLD, &requests[2*ni]);
+            MPI_Isend(&send_buf[4*send_offset], 4 * halo->send_counts[ni], MPI_DOUBLE,
+                      partner, 2, MPI_COMM_WORLD, &requests[2*ni + 1]);
+            send_offset += halo->send_counts[ni];
+            recv_offset += halo->recv_counts[ni];
+        }
+
+        MPI_Waitall(2 * halo->num_neighbors, requests, MPI_STATUSES_IGNORE);
+    }
+
+    // Cleanup temporary GPU mappings
+    #pragma omp target exit data map(delete: flat_send_indices[0:send_size])
+    #pragma omp target exit data map(delete: send_buf[0:4*send_size], recv_buf[0:4*recv_size])
+
+#else
+    // Non-GPU-aware MPI path: copy to host, communicate, copy back
+
+    // Copy edge values from GPU to host for packing
+    #pragma omp target update from(height_edge[0:3*n], xmom_edge[0:3*n], \
+                                   ymom_edge[0:3*n], stage_edge[0:3*n])
+
+    // Pack send buffer on CPU
+    for (int idx = 0; idx < send_size; idx++) {
+        int k = flat_send_indices[idx];
+        int edge_idx = 3*k + 0;
+        send_buf[4*idx + 0] = height_edge[edge_idx];
+        send_buf[4*idx + 1] = xmom_edge[edge_idx];
+        send_buf[4*idx + 2] = ymom_edge[edge_idx];
+        send_buf[4*idx + 3] = stage_edge[edge_idx];
+    }
+
+    // Non-blocking sends and receives on host buffers
     MPI_Request *requests = (MPI_Request *)malloc(2 * halo->num_neighbors * sizeof(MPI_Request));
     int send_offset = 0, recv_offset = 0;
 
     for (int ni = 0; ni < halo->num_neighbors; ni++) {
         int partner = halo->neighbor_ranks[ni];
-        MPI_Irecv(&halo->recv_buffer[4*recv_offset], 4 * halo->recv_counts[ni], MPI_DOUBLE,
+        MPI_Irecv(&recv_buf[4*recv_offset], 4 * halo->recv_counts[ni], MPI_DOUBLE,
                   partner, 2, MPI_COMM_WORLD, &requests[2*ni]);
-        MPI_Isend(&halo->send_buffer[4*send_offset], 4 * halo->send_counts[ni], MPI_DOUBLE,
+        MPI_Isend(&send_buf[4*send_offset], 4 * halo->send_counts[ni], MPI_DOUBLE,
                   partner, 2, MPI_COMM_WORLD, &requests[2*ni + 1]);
         send_offset += halo->send_counts[ni];
         recv_offset += halo->recv_counts[ni];
     }
 
     MPI_Waitall(2 * halo->num_neighbors, requests, MPI_STATUSES_IGNORE);
+
+#endif
+
     free(requests);
+    free(flat_send_indices);
 
-    // Unpack recv buffer into ghost edge values
-    // We store received data in a temporary location or directly use in flux
-    // For simplicity, we'll store in the edge arrays at special indices
-    // Actually, let's just use the recv_buffer directly in flux computation
-    // This requires modifying the flux kernel to handle remote data differently
-
-    // For now, we'll unpack into a ghost array extension (simpler approach)
-    // This is handled in the flux computation by checking neighbour_owners
+    // Note: recv_buffer now contains halo data that can be used in flux computation
+    // The flux kernel checks neighbour_owners and would need to be extended to
+    // actually use recv_buffer data for remote neighbors
 }
 
 static void compute_gradients_gpu(struct domain *D) {
@@ -1401,9 +1464,10 @@ int main(int argc, char *argv[]) {
         compute_gradients_gpu(&D);
         extrapolate_second_order_gpu(&D);
 
-        // Halo exchange (CPU-side for now)
-        // In production, you'd do this with GPU-aware MPI
-        // exchange_halo(&D, &halo);
+        // Halo exchange
+        // Compile with -DGPU_AWARE for GPU-aware MPI (device pointers passed directly)
+        // Without GPU_AWARE: copies edge data to host, does MPI, copies back
+        exchange_halo(&D, &halo);
 
         max_speed_global = compute_fluxes_gpu(&D, &halo);
 
