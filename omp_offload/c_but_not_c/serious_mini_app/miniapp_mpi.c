@@ -140,6 +140,9 @@ struct delta_config {
 
     // Rain
     double rain_rate;         // Rain rate (m/s), e.g., 50mm/hr = 1.4e-5 m/s
+
+    // Bottom friction (Manning's n)
+    double manning_n;         // Manning roughness coefficient (s/m^(1/3))
 };
 
 static void print_progress(int current, int total, double elapsed, double sim_time, int yields) {
@@ -1286,6 +1289,50 @@ static void apply_rain_gpu(struct domain *D, struct delta_config *cfg, double dt
     }
 }
 
+// Apply bottom friction using Manning's formula (semi-implicit for stability)
+// Friction term: S = -g * n² * u * |u| / h^(4/3)
+// Semi-implicit: uh^{n+1} = uh^n / (1 + dt * g * n² * |u| / h^(4/3))
+static void apply_friction_gpu(struct domain *D, struct delta_config *cfg, double dt) {
+    if (!cfg->enabled || cfg->manning_n == 0.0) return;
+
+    int n = D->number_of_elements;
+    double g = D->g;
+    double h0 = D->minimum_allowed_height;
+    double n_sq = cfg->manning_n * cfg->manning_n;
+
+    double *xmom_c = D->xmom_centroid_values;
+    double *ymom_c = D->ymom_centroid_values;
+    double *height_c = D->height_centroid_values;
+
+    #pragma omp target teams distribute parallel for
+    for (int k = 0; k < n; k++) {
+        double h = height_c[k];
+
+        if (h > h0) {
+            double uh = xmom_c[k];
+            double vh = ymom_c[k];
+
+            // Velocity magnitude
+            double u = uh / h;
+            double v = vh / h;
+            double speed = sqrt(u*u + v*v);
+
+            if (speed > 1.0e-10) {
+                // h^(4/3) for Manning formula
+                double h43 = pow(h, 4.0/3.0);
+
+                // Friction coefficient: g * n² * |u| / h^(4/3)
+                double friction_coeff = g * n_sq * speed / h43;
+
+                // Semi-implicit update: divide by (1 + dt * friction_coeff)
+                double denom = 1.0 + dt * friction_coeff;
+                xmom_c[k] = uh / denom;
+                ymom_c[k] = vh / denom;
+            }
+        }
+    }
+}
+
 int main(int argc, char *argv[]) {
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
@@ -1349,6 +1396,13 @@ int main(int argc, char *argv[]) {
     // - 50 mm/day = 50e-3 m / 86400 s ≈ 5.8e-7 m/s
     delta_cfg.rain_rate = 50.0e-3 / 86400.0; // 50 mm/day (moderate monsoon)
 
+    // Bottom friction - Manning's n
+    // - Smooth concrete: 0.012
+    // - Natural channels: 0.025-0.035
+    // - Floodplains with vegetation: 0.05-0.15
+    // - Delta with mixed land/water: ~0.03
+    delta_cfg.manning_n = 0.03;  // Typical for natural delta channels
+
     if (grid_size < 3) {
         if (mpi_rank == 0) fprintf(stderr, "Error: Grid size must be at least 3\n");
         MPI_Finalize();
@@ -1399,7 +1453,9 @@ int main(int argc, char *argv[]) {
             printf("    Discharge:      %.0f m^3/s\n", delta_cfg.river_discharge);
             printf("    Velocity:       %.1f m/s\n", delta_cfg.river_velocity);
             printf("  Rain (monsoon):\n");
-            printf("    Rate:           %.1f mm/day\n\n", delta_cfg.rain_rate * 86400.0 * 1000.0);
+            printf("    Rate:           %.1f mm/day\n", delta_cfg.rain_rate * 86400.0 * 1000.0);
+            printf("  Friction (Manning):\n");
+            printf("    Manning's n:    %.3f s/m^(1/3)\n\n", delta_cfg.manning_n);
         } else {
             printf("Mode: FLAT BOTTOM (uniform depth)\n\n");
         }
@@ -1595,6 +1651,7 @@ int main(int argc, char *argv[]) {
             apply_tide_gpu(&D, &delta_cfg, sim_time + dt);
             apply_river_discharge_gpu(&D, &delta_cfg, dt, river_area);
             apply_rain_gpu(&D, &delta_cfg, dt);
+            apply_friction_gpu(&D, &delta_cfg, dt);
         }
 
         sim_time += dt;
