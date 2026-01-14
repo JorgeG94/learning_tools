@@ -1268,24 +1268,38 @@ int main(int argc, char *argv[]) {
     double initial_height = (argc >= 7) ? atof(argv[6]) : 10.0;
     int delta_mode = (argc >= 8) ? atoi(argv[7]) : 0;
 
-    // Set up delta configuration
+    // Set up delta configuration - calibrated for Mahanadi Delta, India
     struct delta_config delta_cfg;
     delta_cfg.enabled = delta_mode;
 
-    // Realistic-ish river delta parameters
-    delta_cfg.ocean_depth = 10.0;          // 10m deep ocean
-    delta_cfg.land_height = 3.0;           // Land rises to 3m above sea level
-    delta_cfg.channel_depth = 5.0;         // River channel 5m deep
-    delta_cfg.channel_width = 0.1;         // Channel is 10% of domain width
+    // Mahanadi Delta bathymetry (Bay of Bengal coast)
+    // - Delta is very low-lying, mostly 0-5m above MSL
+    // - Coastal shelf is shallow near Paradip
+    // - Chilka lagoon initial stage ~0.15m (set via initial_height arg)
+    delta_cfg.ocean_depth = 8.0;           // Bay of Bengal shelf ~5-10m near coast
+    delta_cfg.land_height = 2.0;           // Delta plain 1-3m above MSL (low-lying)
+    delta_cfg.channel_depth = 6.0;         // Mahanadi main channels 4-8m deep
+    delta_cfg.channel_width = 0.08;        // ~8% of domain (multiple distributaries)
 
-    delta_cfg.tide_amplitude = 1.5;        // 1.5m tidal range (3m total)
-    delta_cfg.tide_period = 12.4 * 3600.0; // Semi-diurnal tide (~12.4 hours)
-    delta_cfg.mean_sea_level = 0.0;        // Reference level
+    // Tidal forcing at Paradip, Bay of Bengal
+    // - Semi-diurnal (M2) dominant, ~12.42 hour period
+    // - Spring tidal range ~2-2.5m, neap ~1-1.5m
+    delta_cfg.tide_amplitude = 1.0;        // 1m amplitude = 2m range (avg conditions)
+    delta_cfg.tide_period = 12.42 * 3600.0; // M2 tidal constituent = 12h 25min
+    delta_cfg.mean_sea_level = 0.0;        // Reference datum
 
-    delta_cfg.river_discharge = 1000.0;    // 1000 m³/s (medium-sized river)
-    delta_cfg.river_velocity = 1.5;        // 1.5 m/s inflow velocity
+    // River discharge (Mahanadi via Naraj + Mahanadi barrages)
+    // - Dry season: 200-500 m³/s
+    // - Monsoon: 5,000-20,000+ m³/s (floods can exceed 30,000)
+    // - Normal monsoon: ~2,000-5,000 m³/s combined
+    delta_cfg.river_discharge = 3000.0;    // Moderate monsoon flow (m³/s)
+    delta_cfg.river_velocity = 1.2;        // Typical river velocity (m/s)
 
-    delta_cfg.rain_rate = 20.0e-3 / 3600.0; // 20 mm/hr (heavy rain)
+    // Rainfall - monsoon conditions
+    // - Heavy monsoon: 50-150 mm/day, extreme: 200+ mm/day
+    // - Script uses factors ~1e-8 to convert mm/day to m/s
+    // - 50 mm/day = 50e-3 m / 86400 s ≈ 5.8e-7 m/s
+    delta_cfg.rain_rate = 50.0e-3 / 86400.0; // 50 mm/day (moderate monsoon)
 
     if (grid_size < 3) {
         if (mpi_rank == 0) fprintf(stderr, "Error: Grid size must be at least 3\n");
@@ -1323,21 +1337,21 @@ int main(int argc, char *argv[]) {
         printf("  Triangle area:    %.2f m^2\n\n", triangle_area);
 
         if (delta_cfg.enabled) {
-            printf("Delta Configuration (ENABLED):\n");
+            printf("Delta Configuration (Mahanadi-style):\n");
             printf("  Bathymetry:\n");
-            printf("    Ocean depth:    %.1f m\n", delta_cfg.ocean_depth);
-            printf("    Land height:    %.1f m above MSL\n", delta_cfg.land_height);
-            printf("    Channel depth:  %.1f m\n", delta_cfg.channel_depth);
+            printf("    Ocean depth:    %.1f m (Bay of Bengal shelf)\n", delta_cfg.ocean_depth);
+            printf("    Land height:    %.1f m above MSL (low-lying delta)\n", delta_cfg.land_height);
+            printf("    Channel depth:  %.1f m (distributary channels)\n", delta_cfg.channel_depth);
             printf("    Channel width:  %.0f%% of domain\n", delta_cfg.channel_width * 100);
-            printf("  Tide:\n");
+            printf("  Tide (Paradip-style):\n");
             printf("    Amplitude:      %.2f m (%.2f m range)\n",
                    delta_cfg.tide_amplitude, 2*delta_cfg.tide_amplitude);
-            printf("    Period:         %.2f hours\n", delta_cfg.tide_period / 3600.0);
-            printf("  River:\n");
+            printf("    Period:         %.2f hours (M2 semi-diurnal)\n", delta_cfg.tide_period / 3600.0);
+            printf("  River (Mahanadi-style):\n");
             printf("    Discharge:      %.0f m^3/s\n", delta_cfg.river_discharge);
             printf("    Velocity:       %.1f m/s\n", delta_cfg.river_velocity);
-            printf("  Rain:\n");
-            printf("    Rate:           %.1f mm/hr\n\n", delta_cfg.rain_rate * 3600.0 * 1000.0);
+            printf("  Rain (monsoon):\n");
+            printf("    Rate:           %.1f mm/day\n\n", delta_cfg.rain_rate * 86400.0 * 1000.0);
         } else {
             printf("Mode: FLAT BOTTOM (uniform depth)\n\n");
         }
@@ -1350,7 +1364,7 @@ int main(int argc, char *argv[]) {
     D.local_start = local_start;
     D.g = 9.81;
     D.epsilon = 1.0e-12;
-    D.minimum_allowed_height = 1.0e-6;
+    D.minimum_allowed_height = 0.008;  // 8mm, matches ANUGA default
     D.cfl = 2.0;
     D.domain_length = domain_length;
     D.char_length = domain_length / sqrt((double)n_global / 2.0);
@@ -1573,7 +1587,7 @@ int main(int argc, char *argv[]) {
         double time_per_step = t_compute_total / (double)niter;
         double steps_per_second = 1.0 / time_per_step;
         dt = sim_time / (double)niter;
-        double target_time = 3.5 * 24.0 * 3600.0;
+        double target_time = 86400.0;  // 1 day (matches ANUGA finaltime)
         double estimated_steps = target_time / dt;
         double estimated_wallclock = estimated_steps * time_per_step;
 
@@ -1590,7 +1604,7 @@ int main(int argc, char *argv[]) {
         printf("  Average dt:       %.4e s\n", dt);
         printf("  Simulated time:   %.4f s\n\n", sim_time);
 
-        printf("2-DAY SIMULATION ESTIMATE:\n");
+        printf("1-DAY SIMULATION ESTIMATE (86400s):\n");
         printf("  Estimated steps:  %.4e\n", estimated_steps);
         if (estimated_wallclock < 60.0) {
             printf("  Wall-clock:       %.2f seconds\n", estimated_wallclock);
