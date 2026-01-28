@@ -1,6 +1,6 @@
 program mpi_saxpy_3d
   use, intrinsic :: iso_fortran_env, only : real64
-  use mpi_f08
+  use mpi
   use omp_lib
   use nvtx
   implicit none
@@ -54,10 +54,11 @@ program mpi_saxpy_3d
      kstart   = remainder * (base + 1) + (myrank - remainder) * base + 1
   end if
   kend = kstart + nk_local - 1
-call nvtxStartRange("Domain decompo")
+
+  call nvtxStartRange("Domain decompo")
   ! mpi crap
   if (myrank == 0) then
-    t1_rank = omp_get_wtime()
+     t1_rank = omp_get_wtime()
      allocate(sendcounts(nranks), displs(nranks))
      do r = 0, nranks - 1
         if (r < remainder) then
@@ -75,7 +76,7 @@ call nvtxStartRange("Domain decompo")
      
      ! can this be initialized on the GPU? 
      do concurrent(k=1:dims, j=1:dims, i=1:dims)
-       a_global(i,j,k) = 1.0_real64
+        a_global(i,j,k) = 1.0_real64
      end do
      t2_rank = omp_get_wtime()
      print '(A,F18.8)', 'Time rank 0 (s) = ', t2_rank - t1_rank
@@ -109,24 +110,25 @@ call nvtxStartRange("Domain decompo")
   if (myrank == 0) then
      print '(A,F18.8)', 'Time init (s) = ', t2 - t1
   end if
-! initialize things, alloc on the GPU 
+
+  ! initialize things, alloc on the GPU 
   call MPI_Barrier(MPI_COMM_WORLD, ierr)
   t1 = omp_get_wtime()
 
   do concurrent (k = 1:nk_local, j = 1:dims, i = 1:dims)
-    b(i,j,k) = 2.0_real64
-    c(i,j,k) = 0.0_real64
+     b(i,j,k) = 2.0_real64
+     c(i,j,k) = 0.0_real64
   end do
 
   ! perform JAXPY
   do ii = 1, niters
-  do concurrent (k = 1:nk_local, j = 1:dims, i = 1:dims)
-     c(i,j,k) = alpha * a(i,j,k) + b(i,j,k)
-  end do
+     do concurrent (k = 1:nk_local, j = 1:dims, i = 1:dims)
+        c(i,j,k) = alpha * a(i,j,k) + b(i,j,k)
+     end do
   end do
 
   local_sum = 0.0_real64
-  ! needs gfortran rcent
+  ! needs gfortran recent
   do concurrent (k = 1:nk_local, j = 1:dims, i = 1:dims) reduce(+:local_sum)
      local_sum = local_sum + c(i,j,k)
   end do
@@ -140,10 +142,10 @@ call nvtxStartRange("Domain decompo")
   call MPI_Barrier(MPI_COMM_WORLD, ierr)
   t2 = omp_get_wtime()
 
-  ! time is the global time, not the per rank time although might be a good ide ato report per rank timigns
+  ! time is the global time, not the per rank time although might be a good idea to report per rank timings
   if (myrank == 0) then
      print '(A,ES18.8)', 'Global sum = ', global_sum
-     print '(A,ES18.8)', 'Expected   = ', 4.0_real64 * dims**3
+     print '(A,ES18.8)', 'Expected   = ', 2.0_real64 * dims**3
      print '(A,F18.8)', 'Time (s) = ', t2 - t1
   end if
 
@@ -151,4 +153,3 @@ call nvtxStartRange("Domain decompo")
   deallocate(a,b,c)
   call MPI_Finalize(ierr)
 end program mpi_saxpy_3d
-
