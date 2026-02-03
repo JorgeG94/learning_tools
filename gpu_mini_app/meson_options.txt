@@ -1,0 +1,5 @@
+option('gpu_offload', type: 'boolean', value: false,
+       description: 'Enable GPU offloading via OpenMP target directives')
+
+option('gpu_arch', type: 'string', value: 'cc70',
+       description: 'GPU architecture (e.g., cc70, cc80 for NVIDIA HPC SDK, sm_70, sm_80 for others)')

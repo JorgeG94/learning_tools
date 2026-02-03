@@ -6,8 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <stdint.h>
-#include <inttypes.h>
 #include <omp.h>
 #include <mpi.h>
 //#include <caliper/cali.h>
@@ -17,9 +15,9 @@
 #endif
 
 struct domain {
-    size_t number_of_elements;   // Local elements on this rank
-    size_t global_elements;      // Total elements across all ranks
-    size_t local_start;          // Global index of first local element
+    int number_of_elements;      // Local elements on this rank
+    int global_elements;         // Total elements across all ranks
+    int local_start;             // Global index of first local element
 
     // Centroid values (per triangle)
     double *stage_centroid_values;
@@ -61,8 +59,8 @@ struct domain {
     double *edge_midpoint_y;
 
     // Mesh connectivity (local indices, -1 for boundary, -2-rank for remote)
-    int64_t *neighbours;
-    int *neighbour_owners;       // Which rank owns each neighbour (-1 for local, small values)
+    int *neighbours;
+    int *neighbour_owners;       // Which rank owns each neighbour (-1 for local)
     double *edgelengths;
     double *normals;
     double *areas;
@@ -80,24 +78,24 @@ struct domain {
 
 // Halo exchange structure
 struct halo_info {
-    int num_neighbors;           // Number of MPI neighbors (small)
-    int *neighbor_ranks;         // Ranks we communicate with (small values)
-    int *send_counts;            // Elements to send to each neighbor (small, MPI uses int)
-    int *recv_counts;            // Elements to receive from each neighbor (small, MPI uses int)
-    size_t **send_indices;       // Local element indices to send (can be large)
-    size_t **recv_indices;       // Local edge indices where received data goes (can be large)
+    int num_neighbors;           // Number of MPI neighbors
+    int *neighbor_ranks;         // Ranks we communicate with
+    int *send_counts;            // Elements to send to each neighbor
+    int *recv_counts;            // Elements to receive from each neighbor
+    int **send_indices;          // Local indices to send
+    int **recv_indices;          // Local indices where received data goes
 
     // Buffers for edge data (4 doubles per edge: h, uh, vh, stage)
     double *send_buffer;
     double *recv_buffer;
-    int send_buffer_size;        // Small (halo size), MPI compatible
-    int recv_buffer_size;        // Small (halo size), MPI compatible
+    int send_buffer_size;
+    int recv_buffer_size;
 
     // Precomputed flattened arrays for GPU (computed once at setup)
-    size_t *flat_send_indices;   // Flattened local element indices to send
-    size_t *flat_recv_edge_indices; // Flattened local edge indices that receive halo data
-    int64_t *edge_to_recv_idx;   // Maps edge index -> recv_buffer index (-1 if not remote)
-    size_t n_local_elements;     // Number of local elements (for edge_to_recv_idx size)
+    int *flat_send_indices;      // Flattened local element indices to send
+    int *flat_recv_edge_indices; // Flattened local edge indices that receive halo data
+    int *edge_to_recv_idx;       // Maps edge index -> recv_buffer index (-1 if not remote)
+    int n_local_elements;        // Number of local elements (for edge_to_recv_idx size)
 };
 
 // Verbose output structure (for yieldstep transfers)
@@ -170,7 +168,7 @@ static void print_progress(int current, int total, double elapsed, double sim_ti
 // mode 1 = gather (all data to rank 0 - for debugging)
 static void transfer_yieldstep(struct domain *D, struct verbose_output *out,
                                 double *t_transfer, int gather_mode) {
-    size_t n = D->number_of_elements;
+    int n = D->number_of_elements;
     double t0 = omp_get_wtime();
     double g = D->g;
     double h0 = D->minimum_allowed_height;
@@ -193,7 +191,7 @@ static void transfer_yieldstep(struct domain *D, struct verbose_output *out,
 
     // Copy to output and compute derived quantities in one loop
     #pragma omp parallel for
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         double h = D->height_centroid_values[k];
         double uh = D->xmom_centroid_values[k];
         double vh = D->ymom_centroid_values[k];
@@ -226,7 +224,7 @@ static void transfer_yieldstep(struct domain *D, struct verbose_output *out,
 
     // Copy edge arrays
     #pragma omp parallel for
-    for (size_t k = 0; k < 3*n; k++) {
+    for (int k = 0; k < 3*n; k++) {
         out->stage_edge[k] = D->stage_edge_values[k];
         out->height_edge[k] = D->height_edge_values[k];
     }
@@ -272,39 +270,39 @@ static void transfer_yieldstep(struct domain *D, struct verbose_output *out,
 }
 
 // Determine which rank owns a global triangle index
-static int get_owner(int64_t global_idx, size_t n_global, int nprocs) {
+static int get_owner(int global_idx, int n_global, int nprocs) {
     if (global_idx < 0) return -1;  // Boundary
-    size_t base = n_global / nprocs;
-    size_t remainder = n_global % nprocs;
+    int base = n_global / nprocs;
+    int remainder = n_global % nprocs;
 
     // Ranks 0..remainder-1 have base+1 elements
     // Ranks remainder..nprocs-1 have base elements
-    if ((size_t)global_idx < (base + 1) * remainder) {
-        return (int)(global_idx / (int64_t)(base + 1));
+    if (global_idx < (base + 1) * remainder) {
+        return global_idx / (base + 1);
     } else {
-        return (int)(remainder + (global_idx - (int64_t)((base + 1) * remainder)) / (int64_t)base);
+        return remainder + (global_idx - (base + 1) * remainder) / base;
     }
 }
 
 // Get local index from global index for a given rank
-static size_t global_to_local(int64_t global_idx, size_t n_global, int nprocs, int rank) {
-    size_t base = n_global / nprocs;
-    size_t remainder = n_global % nprocs;
-    size_t start;
+static int global_to_local(int global_idx, int n_global, int nprocs, int rank) {
+    int base = n_global / nprocs;
+    int remainder = n_global % nprocs;
+    int start;
 
-    if (rank < (int)remainder) {
+    if (rank < remainder) {
         start = rank * (base + 1);
     } else {
         start = remainder * (base + 1) + (rank - remainder) * base;
     }
-    return (size_t)(global_idx - (int64_t)start);
+    return global_idx - start;
 }
 
-static void compute_partition(size_t n_global, int nprocs, int rank, size_t *start, size_t *count) {
-    size_t base = n_global / nprocs;
-    size_t remainder = n_global % nprocs;
+static void compute_partition(int n_global, int nprocs, int rank, int *start, int *count) {
+    int base = n_global / nprocs;
+    int remainder = n_global % nprocs;
 
-    if (rank < (int)remainder) {
+    if (rank < remainder) {
         *start = rank * (base + 1);
         *count = base + 1;
     } else {
@@ -313,22 +311,22 @@ static void compute_partition(size_t n_global, int nprocs, int rank, size_t *sta
     }
 }
 
-static void generate_mesh_local(struct domain *D, size_t grid_size) {
-    size_t nx = grid_size;
-    size_t ny = grid_size;
-    size_t n = D->number_of_elements;
-    size_t n_global = D->global_elements;
-    size_t local_start = D->local_start;
-    double dx = D->domain_length / (double)(nx - 1);
-    double dy = D->domain_length / (double)(ny - 1);
+static void generate_mesh_local(struct domain *D, int grid_size) {
+    int nx = grid_size;
+    int ny = grid_size;
+    int n = D->number_of_elements;
+    int n_global = D->global_elements;
+    int local_start = D->local_start;
+    double dx = D->domain_length / (nx - 1);
+    double dy = D->domain_length / (ny - 1);
 
     double area = 0.5 * dx * dy;
     double edgelen = dx;
     double radius = area / (1.5 * edgelen);
 
     #pragma omp parallel for
-    for (size_t k_local = 0; k_local < n; k_local++) {
-        size_t k_global = local_start + k_local;
+    for (int k_local = 0; k_local < n; k_local++) {
+        int k_global = local_start + k_local;
 
         D->areas[k_local] = area;
         D->radii[k_local] = radius;
@@ -341,10 +339,10 @@ static void generate_mesh_local(struct domain *D, size_t grid_size) {
         D->normals[6*k_local + 2] = 0.0;  D->normals[6*k_local + 3] = 1.0;
         D->normals[6*k_local + 4] = -0.707; D->normals[6*k_local + 5] = -0.707;
 
-        size_t cell = k_global / 2;
-        size_t tri_in_cell = k_global % 2;
-        size_t cell_x = cell % (nx - 1);
-        size_t cell_y = cell / (nx - 1);
+        int cell = k_global / 2;
+        int tri_in_cell = k_global % 2;
+        int cell_x = cell % (nx - 1);
+        int cell_y = cell / (nx - 1);
 
         double x0, y0, x1, y1, x2, y2;
         if (tri_in_cell == 0) {
@@ -367,21 +365,21 @@ static void generate_mesh_local(struct domain *D, size_t grid_size) {
         D->edge_midpoint_x[3*k_local + 2] = (x0 + x1) / 2.0;
         D->edge_midpoint_y[3*k_local + 2] = (y0 + y1) / 2.0;
 
-        // Compute global neighbor indices (int64_t for signed, can be -1)
-        int64_t nb_global[3];
+        // Compute global neighbor indices
+        int nb_global[3];
         if (tri_in_cell == 0) {
-            nb_global[0] = (int64_t)k_global + 1;
-            nb_global[1] = (cell_y > 0) ? (int64_t)(2 * ((cell_y - 1) * (nx - 1) + cell_x) + 1) : -1;
-            nb_global[2] = (cell_x > 0) ? (int64_t)(2 * (cell_y * (nx - 1) + (cell_x - 1)) + 1) : -1;
+            nb_global[0] = k_global + 1;
+            nb_global[1] = (cell_y > 0) ? 2 * ((cell_y - 1) * (nx - 1) + cell_x) + 1 : -1;
+            nb_global[2] = (cell_x > 0) ? 2 * (cell_y * (nx - 1) + (cell_x - 1)) + 1 : -1;
         } else {
-            nb_global[0] = (int64_t)k_global - 1;
-            nb_global[1] = (cell_y < ny - 2) ? (int64_t)(2 * ((cell_y + 1) * (nx - 1) + cell_x)) : -1;
-            nb_global[2] = (cell_x < nx - 2) ? (int64_t)(2 * (cell_y * (nx - 1) + (cell_x + 1))) : -1;
+            nb_global[0] = k_global - 1;
+            nb_global[1] = (cell_y < ny - 2) ? 2 * ((cell_y + 1) * (nx - 1) + cell_x) : -1;
+            nb_global[2] = (cell_x < nx - 2) ? 2 * (cell_y * (nx - 1) + (cell_x + 1)) : -1;
         }
 
         // Convert to local indices and track owners
         for (int i = 0; i < 3; i++) {
-            int64_t ng = nb_global[i];
+            int ng = nb_global[i];
             if (ng < 0) {
                 // Physical boundary
                 D->neighbours[3*k_local + i] = -1;
@@ -391,7 +389,7 @@ static void generate_mesh_local(struct domain *D, size_t grid_size) {
                 D->neighbour_owners[3*k_local + i] = owner;
                 if (owner == mpi_rank) {
                     // Local neighbor
-                    D->neighbours[3*k_local + i] = (int64_t)global_to_local(ng, n_global, mpi_size, mpi_rank);
+                    D->neighbours[3*k_local + i] = global_to_local(ng, n_global, mpi_size, mpi_rank);
                 } else {
                     // Remote neighbor - store global index (will be remapped after halo setup)
                     D->neighbours[3*k_local + i] = ng;
@@ -463,11 +461,11 @@ static double compute_delta_bed(double x, double y, double domain_length,
 
 static void init_quantities(struct domain *D, double initial_height,
                             struct delta_config *cfg) {
-    size_t n = D->number_of_elements;
+    int n = D->number_of_elements;
     double L = D->domain_length;
 
     #pragma omp parallel for
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         double x = D->centroid_x[k];
         double y = D->centroid_y[k];
 
@@ -515,15 +513,15 @@ static void init_quantities(struct domain *D, double initial_height,
 
 // Build halo exchange info
 static void build_halo_info(struct domain *D, struct halo_info *halo) {
-    size_t n = D->number_of_elements;
-    size_t n_global = D->global_elements;
+    int n = D->number_of_elements;
+    int n_global = D->global_elements;
 
     halo->n_local_elements = n;
 
     // Count neighbors on each remote rank
     int *rank_counts = (int *)calloc(mpi_size, sizeof(int));
 
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         for (int i = 0; i < 3; i++) {
             int owner = D->neighbour_owners[3*k + i];
             if (owner >= 0 && owner != mpi_rank) {
@@ -548,8 +546,8 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
         halo->recv_buffer = NULL;
         halo->flat_send_indices = NULL;
         halo->flat_recv_edge_indices = NULL;
-        halo->edge_to_recv_idx = (int64_t *)malloc(3 * n * sizeof(int64_t));
-        for (size_t i = 0; i < 3 * n; i++) halo->edge_to_recv_idx[i] = -1;
+        halo->edge_to_recv_idx = (int *)malloc(3 * n * sizeof(int));
+        for (int i = 0; i < 3 * n; i++) halo->edge_to_recv_idx[i] = -1;
         free(rank_counts);
         return;
     }
@@ -557,15 +555,15 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
     halo->neighbor_ranks = (int *)malloc(halo->num_neighbors * sizeof(int));
     halo->send_counts = (int *)malloc(halo->num_neighbors * sizeof(int));
     halo->recv_counts = (int *)malloc(halo->num_neighbors * sizeof(int));
-    halo->send_indices = (size_t **)malloc(halo->num_neighbors * sizeof(size_t *));
-    halo->recv_indices = (size_t **)malloc(halo->num_neighbors * sizeof(size_t *));
+    halo->send_indices = (int **)malloc(halo->num_neighbors * sizeof(int *));
+    halo->recv_indices = (int **)malloc(halo->num_neighbors * sizeof(int *));
 
     int idx = 0;
     for (int r = 0; r < mpi_size; r++) {
         if (rank_counts[r] > 0) {
             halo->neighbor_ranks[idx] = r;
             halo->recv_counts[idx] = rank_counts[r];
-            halo->recv_indices[idx] = (size_t *)malloc(rank_counts[r] * sizeof(size_t));
+            halo->recv_indices[idx] = (int *)malloc(rank_counts[r] * sizeof(int));
             idx++;
         }
     }
@@ -573,7 +571,7 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
     // Fill recv_indices with local edge indices that need remote data
     int *fill_idx = (int *)calloc(halo->num_neighbors, sizeof(int));
 
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         for (int i = 0; i < 3; i++) {
             int owner = D->neighbour_owners[3*k + i];
             if (owner >= 0 && owner != mpi_rank) {
@@ -604,34 +602,34 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
     // We'll exchange the global indices and convert to local
 
     for (int ni = 0; ni < halo->num_neighbors; ni++) {
-        halo->send_indices[ni] = (size_t *)malloc(halo->send_counts[ni] * sizeof(size_t));
+        halo->send_indices[ni] = (int *)malloc(halo->send_counts[ni] * sizeof(int));
     }
 
-    // Exchange the global indices each rank needs (use int64_t for large meshes)
+    // Exchange the global indices each rank needs
     // recv_indices stores local edge indices; we need to send the corresponding global neighbor indices
-    int64_t **global_needed = (int64_t **)malloc(halo->num_neighbors * sizeof(int64_t *));
+    int **global_needed = (int **)malloc(halo->num_neighbors * sizeof(int *));
     for (int ni = 0; ni < halo->num_neighbors; ni++) {
-        global_needed[ni] = (int64_t *)malloc(halo->recv_counts[ni] * sizeof(int64_t));
+        global_needed[ni] = (int *)malloc(halo->recv_counts[ni] * sizeof(int));
         for (int j = 0; j < halo->recv_counts[ni]; j++) {
-            size_t edge_idx = halo->recv_indices[ni][j];
+            int edge_idx = halo->recv_indices[ni][j];
             global_needed[ni][j] = D->neighbours[edge_idx];  // Still stores global index
         }
     }
 
-    // Exchange to learn what we need to send (MPI_INT64_T for large indices)
-    int64_t **global_to_send = (int64_t **)malloc(halo->num_neighbors * sizeof(int64_t *));
+    // Exchange to learn what we need to send
+    int **global_to_send = (int **)malloc(halo->num_neighbors * sizeof(int *));
     for (int ni = 0; ni < halo->num_neighbors; ni++) {
-        global_to_send[ni] = (int64_t *)malloc(halo->send_counts[ni] * sizeof(int64_t));
+        global_to_send[ni] = (int *)malloc(halo->send_counts[ni] * sizeof(int));
         int partner = halo->neighbor_ranks[ni];
-        MPI_Sendrecv(global_needed[ni], halo->recv_counts[ni], MPI_INT64_T, partner, 1,
-                     global_to_send[ni], halo->send_counts[ni], MPI_INT64_T, partner, 1,
+        MPI_Sendrecv(global_needed[ni], halo->recv_counts[ni], MPI_INT, partner, 1,
+                     global_to_send[ni], halo->send_counts[ni], MPI_INT, partner, 1,
                      MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
 
     // Convert global_to_send to local indices for our send_indices
     for (int ni = 0; ni < halo->num_neighbors; ni++) {
         for (int j = 0; j < halo->send_counts[ni]; j++) {
-            int64_t g = global_to_send[ni][j];
+            int g = global_to_send[ni][j];
             // This global index should be owned by us; convert to local
             halo->send_indices[ni][j] = global_to_local(g, n_global, mpi_size, mpi_rank);
         }
@@ -655,12 +653,12 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
     int send_size = halo->send_buffer_size;
     int recv_size = halo->recv_buffer_size;
 
-    halo->flat_send_indices = (size_t *)malloc(send_size * sizeof(size_t));
-    halo->flat_recv_edge_indices = (size_t *)malloc(recv_size * sizeof(size_t));
-    halo->edge_to_recv_idx = (int64_t *)malloc(3 * n * sizeof(int64_t));
+    halo->flat_send_indices = (int *)malloc(send_size * sizeof(int));
+    halo->flat_recv_edge_indices = (int *)malloc(recv_size * sizeof(int));
+    halo->edge_to_recv_idx = (int *)malloc(3 * n * sizeof(int));
 
     // Initialize edge_to_recv_idx to -1 (not a remote neighbor)
-    for (size_t i = 0; i < 3 * n; i++) {
+    for (int i = 0; i < 3 * n; i++) {
         halo->edge_to_recv_idx[i] = -1;
     }
 
@@ -676,7 +674,7 @@ static void build_halo_info(struct domain *D, struct halo_info *halo) {
     offset = 0;
     for (int ni = 0; ni < halo->num_neighbors; ni++) {
         for (int j = 0; j < halo->recv_counts[ni]; j++) {
-            size_t edge_idx = halo->recv_indices[ni][j];
+            int edge_idx = halo->recv_indices[ni][j];
             halo->flat_recv_edge_indices[offset] = edge_idx;
             halo->edge_to_recv_idx[edge_idx] = offset;  // Maps edge -> recv_buffer index
             offset++;
@@ -702,14 +700,14 @@ static void exchange_halo(struct domain *D, struct halo_info *halo) {
     double *stage_edge = D->stage_edge_values;
     double *send_buf = halo->send_buffer;
     double *recv_buf = halo->recv_buffer;
-    size_t *flat_send = halo->flat_send_indices;
+    int *flat_send = halo->flat_send_indices;
 
     // Pack send buffer on GPU (element centroid data for edge 0)
     // We send centroid-extrapolated edge values for the boundary edges
     #pragma omp target teams distribute parallel for
     for (int idx = 0; idx < send_size; idx++) {
-        size_t k = flat_send[idx];  // Local element index
-        size_t edge_idx = 3*k + 0;  // Edge 0 (the one shared with neighbor)
+        int k = flat_send[idx];  // Local element index
+        int edge_idx = 3*k + 0;  // Edge 0 (the one shared with neighbor)
         send_buf[4*idx + 0] = height_edge[edge_idx];
         send_buf[4*idx + 1] = xmom_edge[edge_idx];
         send_buf[4*idx + 2] = ymom_edge[edge_idx];
@@ -764,7 +762,7 @@ static void exchange_halo(struct domain *D, struct halo_info *halo) {
 }
 
 static void compute_gradients_gpu(struct domain *D) {
-    size_t n = D->number_of_elements;
+    int n = D->number_of_elements;
 
     double *stage_c = D->stage_centroid_values;
     double *xmom_c = D->xmom_centroid_values;
@@ -772,7 +770,7 @@ static void compute_gradients_gpu(struct domain *D) {
     double *height_c = D->height_centroid_values;
     double *cx = D->centroid_x;
     double *cy = D->centroid_y;
-    int64_t *neighbours = D->neighbours;
+    int *neighbours = D->neighbours;
     int *neighbour_owners = D->neighbour_owners;
 
     double *stage_gx = D->stage_x_gradient;
@@ -785,7 +783,7 @@ static void compute_gradients_gpu(struct domain *D) {
     double *height_gy = D->height_y_gradient;
 
     #pragma omp target teams distribute parallel for
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         double c_x = cx[k];
         double c_y = cy[k];
         double stage_k = stage_c[k];
@@ -800,7 +798,7 @@ static void compute_gradients_gpu(struct domain *D) {
         double sum_weight = 0.0;
 
         for (int i = 0; i < 3; i++) {
-            int64_t nb = neighbours[3*k + i];
+            int nb = neighbours[3*k + i];
             int owner = neighbour_owners[3*k + i];
 
             // Only use local neighbors for gradient (simplified - skip remote)
@@ -849,7 +847,7 @@ static void compute_gradients_gpu(struct domain *D) {
 }
 
 static void extrapolate_second_order_gpu(struct domain *D) {
-    size_t n = D->number_of_elements;
+    int n = D->number_of_elements;
 
     double *stage_c = D->stage_centroid_values;
     double *xmom_c = D->xmom_centroid_values;
@@ -859,7 +857,7 @@ static void extrapolate_second_order_gpu(struct domain *D) {
     double *cy = D->centroid_y;
     double *ex = D->edge_midpoint_x;
     double *ey = D->edge_midpoint_y;
-    int64_t *neighbours = D->neighbours;
+    int *neighbours = D->neighbours;
     int *neighbour_owners = D->neighbour_owners;
 
     double *stage_gx = D->stage_x_gradient;
@@ -877,7 +875,7 @@ static void extrapolate_second_order_gpu(struct domain *D) {
     double *height_edge = D->height_edge_values;
 
     #pragma omp target teams distribute parallel for
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         double c_x = cx[k];
         double c_y = cy[k];
 
@@ -892,7 +890,7 @@ static void extrapolate_second_order_gpu(struct domain *D) {
         double hgx = height_gx[k], hgy = height_gy[k];
 
         for (int i = 0; i < 3; i++) {
-            size_t ki = 3*k + i;
+            int ki = 3*k + i;
             double dx_e = ex[ki] - c_x;
             double dy_e = ey[ki] - c_y;
 
@@ -901,7 +899,7 @@ static void extrapolate_second_order_gpu(struct domain *D) {
             double dymom = ygx * dx_e + ygy * dy_e;
             double dheight = hgx * dx_e + hgy * dy_e;
 
-            int64_t nb = neighbours[ki];
+            int nb = neighbours[ki];
             int owner = neighbour_owners[ki];
 
             // Minmod limiter (only for local neighbors)
@@ -943,7 +941,7 @@ static void extrapolate_second_order_gpu(struct domain *D) {
 
 // HLL flux with MPI halo support
 static double compute_fluxes_gpu(struct domain *D, struct halo_info *halo) {
-    size_t n = D->number_of_elements;
+    int n = D->number_of_elements;
     double g = D->g;
     double h0 = D->minimum_allowed_height;
     double local_max_speed = 0.0;
@@ -954,7 +952,7 @@ static double compute_fluxes_gpu(struct domain *D, struct halo_info *halo) {
     double *stage_update = D->stage_explicit_update;
     double *xmom_update = D->xmom_explicit_update;
     double *ymom_update = D->ymom_explicit_update;
-    int64_t *neighbours = D->neighbours;
+    int *neighbours = D->neighbours;
     int *neighbour_owners = D->neighbour_owners;
     double *edgelengths = D->edgelengths;
     double *normals = D->normals;
@@ -963,19 +961,19 @@ static double compute_fluxes_gpu(struct domain *D, struct halo_info *halo) {
 
     // Get halo data pointers for GPU
     double *recv_buf = halo->recv_buffer;
-    int64_t *edge_to_recv = halo->edge_to_recv_idx;
+    int *edge_to_recv = halo->edge_to_recv_idx;
 
     #pragma omp target teams distribute parallel for \
         reduction(max: local_max_speed)
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         double stage_flux_sum = 0.0;
         double xmom_flux_sum = 0.0;
         double ymom_flux_sum = 0.0;
         double speed_max = 0.0;
 
         for (int i = 0; i < 3; i++) {
-            size_t ki = 3*k + i;
-            int64_t nb = neighbours[ki];
+            int ki = 3*k + i;
+            int nb = neighbours[ki];
             int owner = neighbour_owners[ki];
 
             double nx = normals[6*k + 2*i];
@@ -995,13 +993,13 @@ static double compute_fluxes_gpu(struct domain *D, struct halo_info *halo) {
                 vh_R = vh_L - 2.0 * vn_L * ny;
             } else if (owner == mpi_rank) {
                 // Local neighbor
-                size_t ki_nb = 3*nb + 0;
+                int ki_nb = 3*nb + 0;
                 h_R = height_edge[ki_nb];
                 uh_R = xmom_edge[ki_nb];
                 vh_R = ymom_edge[ki_nb];
             } else {
                 // Remote neighbor - use received halo data
-                int64_t recv_idx = edge_to_recv[ki];
+                int recv_idx = edge_to_recv[ki];
                 if (recv_idx >= 0) {
                     h_R = recv_buf[4*recv_idx + 0];
                     uh_R = recv_buf[4*recv_idx + 1];
@@ -1091,7 +1089,7 @@ static double compute_fluxes_gpu(struct domain *D, struct halo_info *halo) {
 }
 
 static void protect_gpu(struct domain *D) {
-    size_t n = D->number_of_elements;
+    int n = D->number_of_elements;
     double minimum_allowed_height = D->minimum_allowed_height;
 
     double *stage_c = D->stage_centroid_values;
@@ -1101,7 +1099,7 @@ static void protect_gpu(struct domain *D) {
     double *height_c = D->height_centroid_values;
 
     #pragma omp target teams distribute parallel for
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         double hc = stage_c[k] - bed_c[k];
 
         if (hc < minimum_allowed_height) {
@@ -1118,7 +1116,7 @@ static void protect_gpu(struct domain *D) {
 }
 
 static void update_gpu(struct domain *D, double dt) {
-    size_t n = D->number_of_elements;
+    int n = D->number_of_elements;
 
     double *stage_c = D->stage_centroid_values;
     double *xmom_c = D->xmom_centroid_values;
@@ -1128,7 +1126,7 @@ static void update_gpu(struct domain *D, double dt) {
     double *ymom_update = D->ymom_explicit_update;
 
     #pragma omp target teams distribute parallel for
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         stage_c[k] += dt * stage_update[k];
         xmom_c[k] += dt * xmom_update[k];
         ymom_c[k] += dt * ymom_update[k];
@@ -1137,7 +1135,7 @@ static void update_gpu(struct domain *D, double dt) {
 
 // RK2 helper: Save current state to backup arrays
 static void rk2_save_state_gpu(struct domain *D) {
-    size_t n = D->number_of_elements;
+    int n = D->number_of_elements;
 
     double *stage_c = D->stage_centroid_values;
     double *xmom_c = D->xmom_centroid_values;
@@ -1147,7 +1145,7 @@ static void rk2_save_state_gpu(struct domain *D) {
     double *ymom_bk = D->ymom_backup;
 
     #pragma omp target teams distribute parallel for
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         stage_bk[k] = stage_c[k];
         xmom_bk[k] = xmom_c[k];
         ymom_bk[k] = ymom_c[k];
@@ -1157,7 +1155,7 @@ static void rk2_save_state_gpu(struct domain *D) {
 // RK2 helper: Average current state with backup (Heun's method final step)
 // Q^{n+1} = 0.5 * (Q^n + Q**)
 static void rk2_average_gpu(struct domain *D) {
-    size_t n = D->number_of_elements;
+    int n = D->number_of_elements;
 
     double *stage_c = D->stage_centroid_values;
     double *xmom_c = D->xmom_centroid_values;
@@ -1169,7 +1167,7 @@ static void rk2_average_gpu(struct domain *D) {
     double *ymom_bk = D->ymom_backup;
 
     #pragma omp target teams distribute parallel for
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         stage_c[k] = 0.5 * (stage_bk[k] + stage_c[k]);
         xmom_c[k] = 0.5 * (xmom_bk[k] + xmom_c[k]);
         ymom_c[k] = 0.5 * (ymom_bk[k] + ymom_c[k]);
@@ -1183,7 +1181,7 @@ static void apply_tide_gpu(struct domain *D, struct delta_config *cfg,
                            double sim_time) {
     if (!cfg->enabled || cfg->tide_amplitude == 0.0) return;
 
-    size_t n = D->number_of_elements;
+    int n = D->number_of_elements;
     double L = D->domain_length;
     double tide_zone = 0.05 * L;  // Apply tide in first 5% of domain
 
@@ -1196,7 +1194,7 @@ static void apply_tide_gpu(struct domain *D, struct delta_config *cfg,
                         cfg->tide_amplitude * sin(2.0 * M_PI * sim_time / cfg->tide_period);
 
     #pragma omp target teams distribute parallel for
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         if (cy[k] < tide_zone) {
             // Relaxation toward tidal level (soft boundary)
             double relax = 1.0 - cy[k] / tide_zone;  // 1 at y=0, 0 at y=tide_zone
@@ -1209,16 +1207,16 @@ static void apply_tide_gpu(struct domain *D, struct delta_config *cfg,
 }
 
 // Precompute river inlet area (call once at setup)
-static double compute_river_area(struct domain *D, struct delta_config *cfg, int64_t *n_cells) {
-    size_t n = D->number_of_elements;
+static double compute_river_area(struct domain *D, struct delta_config *cfg, int *n_cells) {
+    int n = D->number_of_elements;
     double L = D->domain_length;
     double inlet_zone = 0.95 * L;
     double channel_center = 0.5 * L;
     double channel_hw = cfg->channel_width * L / 2.0;
 
     double local_area = 0.0;
-    int64_t local_count = 0;
-    for (size_t k = 0; k < n; k++) {
+    int local_count = 0;
+    for (int k = 0; k < n; k++) {
         double x = D->centroid_x[k];
         double y = D->centroid_y[k];
         if (y > inlet_zone && fabs(x - channel_center) < channel_hw) {
@@ -1228,9 +1226,9 @@ static double compute_river_area(struct domain *D, struct delta_config *cfg, int
     }
 
     double global_area;
-    int64_t global_count;
+    int global_count;
     MPI_Allreduce(&local_area, &global_area, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(&local_count, &global_count, 1, MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(&local_count, &global_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
     *n_cells = global_count;
     return global_area;
 }
@@ -1241,7 +1239,7 @@ static void apply_river_discharge_gpu(struct domain *D, struct delta_config *cfg
                                        double dt, double river_area) {
     if (!cfg->enabled || cfg->river_discharge == 0.0 || river_area < 1.0e-10) return;
 
-    size_t n = D->number_of_elements;
+    int n = D->number_of_elements;
     double L = D->domain_length;
     double inlet_zone = 0.95 * L;
     double channel_center = 0.5 * L;
@@ -1259,7 +1257,7 @@ static void apply_river_discharge_gpu(struct domain *D, struct delta_config *cfg
     double momentum_per_area = discharge_per_area * cfg->river_velocity;
 
     #pragma omp target teams distribute parallel for
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         if (cy[k] > inlet_zone && fabs(cx[k] - channel_center) < channel_hw) {
             // Add water (mass)
             stage_c[k] += discharge_per_area * dt;
@@ -1275,7 +1273,7 @@ static void apply_river_discharge_gpu(struct domain *D, struct delta_config *cfg
 static void apply_rain_gpu(struct domain *D, struct delta_config *cfg, double dt) {
     if (!cfg->enabled || cfg->rain_rate == 0.0) return;
 
-    size_t n = D->number_of_elements;
+    int n = D->number_of_elements;
 
     double *stage_c = D->stage_centroid_values;
     double *bed_c = D->bed_centroid_values;
@@ -1284,7 +1282,7 @@ static void apply_rain_gpu(struct domain *D, struct delta_config *cfg, double dt
     double rain_depth = cfg->rain_rate * dt;
 
     #pragma omp target teams distribute parallel for
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         // Rain falls everywhere (even on dry cells - they get wet!)
         stage_c[k] += rain_depth;
         height_c[k] = fmax(stage_c[k] - bed_c[k], 0.0);
@@ -1297,7 +1295,7 @@ static void apply_rain_gpu(struct domain *D, struct delta_config *cfg, double dt
 static void apply_friction_gpu(struct domain *D, struct delta_config *cfg, double dt) {
     if (!cfg->enabled || cfg->manning_n == 0.0) return;
 
-    size_t n = D->number_of_elements;
+    int n = D->number_of_elements;
     double g = D->g;
     double h0 = D->minimum_allowed_height;
     double n_sq = cfg->manning_n * cfg->manning_n;
@@ -1307,7 +1305,7 @@ static void apply_friction_gpu(struct domain *D, struct delta_config *cfg, doubl
     double *height_c = D->height_centroid_values;
 
     #pragma omp target teams distribute parallel for
-    for (size_t k = 0; k < n; k++) {
+    for (int k = 0; k < n; k++) {
         double h = height_c[k];
 
         if (h > h0) {
@@ -1411,8 +1409,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    size_t n_global = 2 * (size_t)(grid_size - 1) * (size_t)(grid_size - 1);
-    size_t local_start, local_n;
+    int n_global = 2 * (grid_size - 1) * (grid_size - 1);
+    int local_start, local_n;
     //CALI_MARK_BEGIN("compute_partition");
     compute_partition(n_global, mpi_size, mpi_rank, &local_start, &local_n);
     //CALI_MARK_END("compute_partition");
@@ -1428,8 +1426,8 @@ int main(int argc, char *argv[]) {
         printf("MPI Configuration:\n");
         printf("  Ranks:            %d\n", mpi_size);
         printf("  GPUs available:   %d\n", num_devices);
-        printf("  Global triangles: %zu\n", n_global);
-        printf("  Local per rank:   ~%zu\n\n", n_global / mpi_size);
+        printf("  Global triangles: %d\n", n_global);
+        printf("  Local per rank:   ~%d\n\n", n_global / mpi_size);
         printf("Physical Setup:\n");
         printf("  Domain:           %.2f km x %.2f km\n", domain_length/1000, domain_length/1000);
         printf("  Initial depth:    %.2f m\n", initial_height);
@@ -1475,7 +1473,7 @@ int main(int argc, char *argv[]) {
     D.domain_length = domain_length;
     D.char_length = domain_length / sqrt((double)n_global / 2.0);
 
-    size_t n = local_n;
+    int n = local_n;
 
     // Allocate arrays
     //CALI_MARK_BEGIN("memory allocation");
@@ -1506,7 +1504,7 @@ int main(int argc, char *argv[]) {
     D.centroid_y = (double *)malloc(n * sizeof(double));
     D.edge_midpoint_x = (double *)malloc(3 * n * sizeof(double));
     D.edge_midpoint_y = (double *)malloc(3 * n * sizeof(double));
-    D.neighbours = (int64_t *)malloc(3 * n * sizeof(int64_t));
+    D.neighbours = (int *)malloc(3 * n * sizeof(int));
     D.neighbour_owners = (int *)malloc(3 * n * sizeof(int));
     D.edgelengths = (double *)malloc(3 * n * sizeof(double));
     D.normals = (double *)malloc(6 * n * sizeof(double));
@@ -1539,20 +1537,20 @@ int main(int argc, char *argv[]) {
     //CALI_MARK_END("generate mesh and init quantities");
 
     // Count wet/dry cells for delta mode
-    int64_t local_wet = 0, local_dry = 0;
-    for (size_t k = 0; k < n; k++) {
+    int local_wet = 0, local_dry = 0;
+    for (int k = 0; k < n; k++) {
         if (D.height_centroid_values[k] > D.minimum_allowed_height) {
             local_wet++;
         } else {
             local_dry++;
         }
     }
-    int64_t global_wet, global_dry;
-    MPI_Reduce(&local_wet, &global_wet, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
-    MPI_Reduce(&local_dry, &global_dry, 1, MPI_INT64_T, MPI_SUM, 0, MPI_COMM_WORLD);
+    int global_wet, global_dry;
+    MPI_Reduce(&local_wet, &global_wet, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_dry, &global_dry, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 
     // Precompute river area for delta mode
-    int64_t n_river_cells = 0;
+    int n_river_cells = 0;
     double river_area = 0.0;
     if (delta_cfg.enabled) {
         river_area = compute_river_area(&D, &delta_cfg, &n_river_cells);
@@ -1560,9 +1558,9 @@ int main(int argc, char *argv[]) {
 
     if (mpi_rank == 0 && delta_cfg.enabled) {
         printf("Initial cell states:\n");
-        printf("  Wet cells:        %" PRId64 " (%.1f%%)\n", global_wet, 100.0 * global_wet / n_global);
-        printf("  Dry cells:        %" PRId64 " (%.1f%%)\n", global_dry, 100.0 * global_dry / n_global);
-        printf("  River inlet:      %" PRId64 " cells, %.0f m^2 area\n\n", n_river_cells, river_area);
+        printf("  Wet cells:        %d (%.1f%%)\n", global_wet, 100.0 * global_wet / n_global);
+        printf("  Dry cells:        %d (%.1f%%)\n", global_dry, 100.0 * global_dry / n_global);
+        printf("  River inlet:      %d cells, %.0f m^2 area\n\n", n_river_cells, river_area);
     }
 
     // Build halo exchange info

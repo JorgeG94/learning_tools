@@ -1,0 +1,16 @@
+[build-system]
+requires = ["meson-python", "cython", "numpy", "mpi4py"]
+build-backend = "mesonpy"
+
+[project]
+name = "gpu_mre"
+version = "0.1.0"
+description = "Minimal reproducible example for MPICH/mpi4py GPU offloading debugging"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "mpi4py",
+]
+
+[tool.meson-python.args]
+setup = []
