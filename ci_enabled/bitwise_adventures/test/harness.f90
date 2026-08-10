@@ -13,7 +13,7 @@
 program harness
 
 use, intrinsic :: iso_fortran_env, only : int64, real64, real128
-use bit_repro, only : exp_reprod, log_reprod, pow_reprod, pow_reprod_explog, cuberoot, erfc_reprod
+use bit_repro, only : exp_reprod, log_reprod, pow_reprod, pow_reprod_explog, cuberoot, erfc_reprod, erfc_reprod_bf
 implicit none
 
 integer, parameter :: n = 2000000
@@ -98,6 +98,9 @@ do i = 1, n
   xs(i) = sign( 0.47_real64 * rand01(), rand01() - 0.5_real64 )  ! Maclaurin band, +-
 enddo
 call accuracy_erfc('erfc [-0.47, 0.47] (Maclaurin band)', xs)
+
+! ---------------- erfc branch-free variant: enforced lockstep -------------------
+call erfc_bf_lockstep()
 
 ! ---------------- pow round-trip property --------------------------------------
 call roundtrip_pow2()
@@ -267,6 +270,24 @@ subroutine accuracy_cbrt(name, x)
   enddo
   call tally(name, 'cuberoot', out1, out2, size(x), budget=1)
 end subroutine accuracy_cbrt
+
+!> The branch-free erfc variant must remain BIT-IDENTICAL to the branchy one
+!! (same selected-arm operation sequences by construction); any drift between
+!! them is a contract violation.
+subroutine erfc_bf_lockstep()
+  integer :: k, nbad
+  real(real64) :: xv
+  nbad = 0
+  do k = 1, n
+    xv = -30.0_real64 + 60.0_real64 * rand01()
+    if (transfer(erfc_reprod(xv), 1_int64) /= transfer(erfc_reprod_bf(xv), 1_int64)) nbad = nbad + 1
+  enddo
+  print '(/,a,i0)', 'erfc branchy-vs-branch-free lockstep diffs: ', nbad
+  if (nbad /= 0) then
+    print '(4x,a)', 'ACCURACY REGRESSION: erfc_bf drifted from erfc_reprod'
+    n_violations = n_violations + 1
+  endif
+end subroutine erfc_bf_lockstep
 
 subroutine roundtrip_pow2()
   integer :: k, bad_rep, bad_int
