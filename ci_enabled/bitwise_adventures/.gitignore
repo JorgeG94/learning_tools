@@ -13,3 +13,5 @@ crossbit_gf
 crossbit_fl
 crossbit_ci*
 fingerprint_ci*
+*.o
+*.smod
