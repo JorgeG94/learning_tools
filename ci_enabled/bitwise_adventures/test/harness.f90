@@ -19,6 +19,7 @@ implicit none
 integer, parameter :: n = 2000000
 real(real64), allocatable :: xs(:), ys(:), out1(:), out2(:)
 integer :: i
+integer :: n_violations = 0  ! budget violations; nonzero exit makes this a CI gate
 integer(int64) :: seed_state
 
 allocate(xs(n), ys(n), out1(n), out2(n))
@@ -117,6 +118,14 @@ do i = 1, n
 enddo
 call bench_log_pow_cbrt(xs, ys)
 
+print '(/,a)', repeat('=', 78)
+if (n_violations == 0) then
+  print '(a)', 'ACCURACY CONTRACT: PASS (all candidates within budget)'
+else
+  print '(a,i0,a)', 'ACCURACY CONTRACT: FAIL (', n_violations, ' budget violations)'
+  error stop 1
+endif
+
 contains
 
 !> xorshift64 PRNG -> uniform in (0,1); reproducible across compilers.
@@ -151,10 +160,11 @@ subroutine report(name, impl, dmax, dsum, ncr, nfaith, nn)
     'CR=', 100.0*real(ncr)/real(nn), '%', 'faithful<=1=', 100.0*real(nfaith)/real(nn), '%'
 end subroutine report
 
-subroutine tally(name, impl, ref, got, nn)
+subroutine tally(name, impl, ref, got, nn, budget)
   character(*), intent(in) :: name, impl
   real(real64), intent(in) :: ref(:), got(:)
   integer, intent(in) :: nn
+  integer, intent(in), optional :: budget !< max acceptable ulp (the accuracy contract)
   integer(int64) :: dmax, dsum, ncr, nfaith, d
   integer :: k
   dmax = 0 ; dsum = 0 ; ncr = 0 ; nfaith = 0
@@ -165,6 +175,12 @@ subroutine tally(name, impl, ref, got, nn)
     if (d <= 1) nfaith = nfaith + 1
   enddo
   call report(name, impl, dmax, dsum, ncr, nfaith, nn)
+  if (present(budget)) then
+    if (dmax > int(budget, int64)) then
+      print '(4x,a,i0,a,i0)', 'ACCURACY REGRESSION: max_ulp ', dmax, ' > budget ', budget
+      n_violations = n_violations + 1
+    endif
+  endif
 end subroutine tally
 
 subroutine accuracy_exp(name, x)
@@ -180,7 +196,7 @@ subroutine accuracy_exp(name, x)
   do k = 1, size(x)
     out2(k) = exp_reprod(x(k))
   enddo
-  call tally(name, 'reprod', out1, out2, size(x))
+  call tally(name, 'reprod', out1, out2, size(x), budget=1)
 end subroutine accuracy_exp
 
 subroutine accuracy_log(name, x)
@@ -196,7 +212,7 @@ subroutine accuracy_log(name, x)
   do k = 1, size(x)
     out2(k) = log_reprod(x(k))
   enddo
-  call tally(name, 'reprod', out1, out2, size(x))
+  call tally(name, 'reprod', out1, out2, size(x), budget=1)
 end subroutine accuracy_log
 
 subroutine accuracy_pow(name, x, y)
@@ -216,7 +232,7 @@ subroutine accuracy_pow(name, x, y)
   do k = 1, size(x)
     out2(k) = pow_reprod(x(k), y(k))
   enddo
-  call tally(name, 'reprod(v2)', out1, out2, size(x))
+  call tally(name, 'reprod(v2)', out1, out2, size(x), budget=2)
 end subroutine accuracy_pow
 
 subroutine accuracy_erfc(name, x)
@@ -232,7 +248,7 @@ subroutine accuracy_erfc(name, x)
   do k = 1, size(x)
     out2(k) = erfc_reprod(x(k))
   enddo
-  call tally(name, 'reprod', out1, out2, size(x))
+  call tally(name, 'reprod', out1, out2, size(x), budget=5)
 end subroutine accuracy_erfc
 
 subroutine accuracy_cbrt(name, x)
@@ -249,7 +265,7 @@ subroutine accuracy_cbrt(name, x)
   do k = 1, size(x)
     out2(k) = cuberoot(x(k))
   enddo
-  call tally(name, 'cuberoot', out1, out2, size(x))
+  call tally(name, 'cuberoot', out1, out2, size(x), budget=1)
 end subroutine accuracy_cbrt
 
 subroutine roundtrip_pow2()
@@ -266,11 +282,20 @@ subroutine roundtrip_pow2()
   print '(/,a)', 'Round-trip property: sqrt(pow(x,2)) == x   (n = 2e6 log-uniform x)'
   print '(2x,a,i9,a,f8.4,a)', 'intrinsic **2.0  failures: ', bad_int, '  (', 100.0*real(bad_int)/real(n), ' %)'
   print '(2x,a,i9,a,f8.4,a)', 'pow_reprod       failures: ', bad_rep, '  (', 100.0*real(bad_rep)/real(n), ' %)'
+  if (bad_rep /= 0) then
+    print '(4x,a)', 'ACCURACY REGRESSION: round-trip property violated'
+    n_violations = n_violations + 1
+  endif
 end subroutine roundtrip_pow2
 
 subroutine specials()
   use, intrinsic :: ieee_arithmetic
   real(real64) :: pinf, ninf, qnan, pzero, nzero, denorm
+  ! volatile: keeps gfortran from constant-folding the intrinsic reference
+  ! calls, which is a compile ERROR for overflowing/negative-base constants
+  real(real64), volatile :: v750, vm750, vz, vm2, v3, vh
+  v750 = 750.0_real64 ; vm750 = -750.0_real64 ; vz = 0.0_real64
+  vm2 = -2.0_real64 ; v3 = 3.0_real64 ; vh = 0.5_real64
   pinf = ieee_value(1.0_real64, ieee_positive_inf)
   ninf = ieee_value(1.0_real64, ieee_negative_inf)
   qnan = ieee_value(1.0_real64, ieee_quiet_nan)
@@ -279,15 +304,15 @@ subroutine specials()
   print '(2x,a,es13.5,a,es13.5)', 'exp(+Inf):  ', exp_reprod(pinf), ' | ', exp(pinf)
   print '(2x,a,es13.5,a,es13.5)', 'exp(-Inf):  ', exp_reprod(ninf), ' | ', exp(ninf)
   print '(2x,a,es13.5,a,es13.5)', 'exp(NaN):   ', exp_reprod(qnan), ' | ', exp(qnan)
-  print '(2x,a,es13.5,a,es13.5)', 'exp(750):   ', exp_reprod(750.0_real64), ' | ', exp(750.0_real64)
-  print '(2x,a,es13.5,a,es13.5)', 'exp(-750):  ', exp_reprod(-750.0_real64), ' | ', exp(-750.0_real64)
+  print '(2x,a,es13.5,a,es13.5)', 'exp(750):   ', exp_reprod(750.0_real64), ' | ', exp(v750)
+  print '(2x,a,es13.5,a,es13.5)', 'exp(-750):  ', exp_reprod(-750.0_real64), ' | ', exp(vm750)
   print '(2x,a,es13.5,a,es13.5)', 'log(0):     ', log_reprod(pzero), ' | ', log(pzero)
   print '(2x,a,es13.5,a,es13.5)', 'log(+Inf):  ', log_reprod(pinf), ' | ', log(pinf)
   print '(2x,a,es13.5,a,es13.5)', 'log(denorm):', log_reprod(denorm), ' | ', log(denorm)
   print '(2x,a,es13.5,a,es13.5)', 'pow(x,0):   ', pow_reprod(qnan, 0.0_real64), ' | ', qnan**0.0_real64
-  print '(2x,a,es13.5,a,es13.5)', 'pow(0,-2):  ', pow_reprod(0.0_real64, -2.0_real64), ' | ', 0.0_real64**(-2.0_real64)
+  print '(2x,a,es13.5,a,es13.5)', 'pow(0,-2):  ', pow_reprod(0.0_real64, -2.0_real64), ' | ', vz**(-2.0_real64)
   print '(2x,a,es13.5,a,es13.5)', 'pow(-0,3):  ', pow_reprod(nzero, 3.0_real64), ' | ', nzero**3.0_real64
-  print '(2x,a,es13.5,a,es13.5)', 'pow(-2,3):  ', pow_reprod(-2.0_real64, 3.0_real64), ' | ', (-2.0_real64)**3.0_real64
+  print '(2x,a,es13.5,a,es13.5)', 'pow(-2,3):  ', pow_reprod(-2.0_real64, 3.0_real64), ' | ', vm2**v3
   print '(2x,a,es13.5,a,es13.5)', 'pow(-2,.5): ', pow_reprod(-2.0_real64, 0.5_real64), ' | ', sqrt(qnan)
   print '(2x,a,es13.5,a,es13.5)', 'pow(-1,Inf):', pow_reprod(-1.0_real64, pinf), ' | ', 1.0_real64
   print '(2x,a,es13.5,a,es13.5)', 'pow(.5,-If):', pow_reprod(0.5_real64, ninf), ' | ', pinf

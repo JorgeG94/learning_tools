@@ -141,3 +141,35 @@ jobs:
         with:
           name: crossbit-dump-job${{ strategy.job-index }}
           path: ci_enabled/bitwise_adventures/crossbit_ci.bin
+
+  # Complementary stage: runs only after every bitwise leg is green.  Bitwise
+  # proves all platforms agree; this proves what they agree ON is accurate --
+  # max-ulp budgets vs a real128 oracle, enforced by the harness exit code
+  # (real128 restricts this stage to gcc/ifx on linux x86).
+  accuracy:
+    name: accuracy / ${{ matrix.toolchain.compiler }}
+    needs: crossbit
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: {compiler: gcc, version: '13'}
+            flags: -O2 -ffp-contract=off
+          - toolchain: {compiler: intel, version: '2025.0'}
+            flags: -O2 -fp-model=precise -no-fma -no-ftz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fortran-lang/setup-fortran@v1
+        id: setup-fortran
+        with:
+          compiler: ${{ matrix.toolchain.compiler }}
+          version: ${{ matrix.toolchain.version }}
+      - name: Build and run the accuracy contract
+        working-directory: ci_enabled/bitwise_adventures
+        env:
+          FC: ${{ steps.setup-fortran.outputs.fc }}
+        run: |
+          $FC ${{ matrix.flags }} src/bit_repro.f90 src/bit_repro_helpers.f90 \
+            test/harness.f90 -o harness_ci
+          ./harness_ci
