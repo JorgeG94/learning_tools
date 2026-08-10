@@ -83,9 +83,26 @@ jobs:
           ./crossbit_ci ci
           echo "--- reference per-set/function cells (from a golden-passing leg):"
           cat REFERENCE_CELLS.txt
+          echo "--- file-byte forensics (compare with REFERENCE_SETHASHES.txt):"
+          python3 -c "
+          import hashlib
+          d = open('crossbit_ci.bin','rb').read()
+          print('size', len(d))
+          n = 200000; blk = 4*n*8
+          for k in range(6):
+              print(f'set{k+1}', hashlib.sha256(d[k*blk:(k+1)*blk]).hexdigest()[:16])
+          "
+          cat REFERENCE_SETHASHES.txt
           got=$(python3 -c "import hashlib;print(hashlib.sha256(open('crossbit_ci.bin','rb').read()).hexdigest())")
           want=$(cut -d' ' -f1 GOLDEN.sha256)
           echo "golden: $want"
           echo "got:    $got"
           test "$got" = "$want" && echo "BITWISE: all values identical to golden" \
             || { echo "::error::bitwise reproducibility broken"; exit 1; }
+
+      - name: Upload dump on failure (for byte-level diffing)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crossbit-dump-job${{ strategy.job-index }}
+          path: ci_enabled/bitwise_adventures/crossbit_ci.bin
