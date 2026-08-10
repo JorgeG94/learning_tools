@@ -296,12 +296,27 @@ elemental function cuberoot(x) result(root)
   real :: r0, r0_3 ! Initial estimate and its cube
   integer :: itt
   integer(kind=int64) :: e_x, s_x
+  real :: xs        ! x, pre-scaled to normal range if x is denormal
+  logical :: denorm ! True for denormal x
+  real, parameter :: two_p54 = 18014398509481984.0  ! 2**54 = (2**18)**3, exact
 
   if ((x >= 0.0) .eqv. (x <= 0.0)) then
-    ! Return 0 for an input of 0, or NaN for a NaN input.
+    ! Return 0 for an input of 0 (sign preserved), or NaN for a NaN input.
+    root = x
+  elseif (abs(x) > huge(x)) then
+    ! The cube root of +-Inf is +-Inf.  Without this guard the exponent-field
+    ! arithmetic below reads Inf's bit pattern as 2**1024 and returns a finite
+    ! ~5.6e102 -- and that ill-defined path is where x86 and arm64 disagreed.
     root = x
   else
-    call rescale_cbrt(x, asx, e_x, s_x)
+    xs = x
+    denorm = (abs(x) < tiny(x))
+    if (denorm) xs = x * two_p54
+    ! Denormal inputs: the exponent field is zero, so rescale_cbrt's bit
+    ! arithmetic reads a nonsense exponent.  Pre-scaling by the exact cube
+    ! 2**54 = (2**18)**3 makes the argument normal; the exact scale(-18)
+    ! afterwards undoes it (the result, >= ~2**-358, is comfortably normal).
+    call rescale_cbrt(xs, asx, e_x, s_x)
     ! Halley's method in fractional form (no divisions inside the iterations).
     r0 = 0.707106
     r0_3 = r0 * r0 * r0
@@ -319,6 +334,7 @@ elemental function cuberoot(x) result(root)
     ra_3 = root_asx * root_asx * root_asx
     root_asx = root_asx - (ra_3 - asx) / (3.0 * (root_asx * root_asx))
     root = descale(root_asx, e_x, s_x)
+    if (denorm) root = scale(root, -18)
   endif
 end function cuberoot
 
