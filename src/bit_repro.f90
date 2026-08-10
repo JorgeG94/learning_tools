@@ -361,8 +361,8 @@ elemental function exp2_pair(h, l) result(e2)
     w = h * 32.0
     n32 = nint(w)
     r = h - real(n32) * 0.03125      ! exact: n32/32 is an exact multiple of 2**-5
-    idx = iand(n32, 31)              ! floor-consistent with the arithmetic shift:
-    n = shifta(n32, 5)               ! n32 = 32*n + idx, 0 <= idx < 32, any sign
+    idx = iand(n32, 31)              ! n32 = 32*n + idx with 0 <= idx < 32 for any
+    n = (n32 - idx) / 32             ! sign; the division is exact (nvfortran has no shifta)
     pp = 1.0 + r*(e2c1 + r*(e2c2 + r*(e2c3 + r*(e2c4 + r*(e2c5 + r*e2c6)))))
     corr = t2lo(idx) + t2hi(idx)*(l*e2c1)   ! 2**l ~ 1 + l*ln2, l ~ 2**-50
     call two_prod(t2hi(idx), pp, vh, vl)
