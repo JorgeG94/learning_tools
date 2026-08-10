@@ -104,7 +104,9 @@ elemental function exp_reprod(x) result(ex)
   if (x /= x) then
     ex = x
   elseif (x > 710.0) then       ! exp overflows past 709.78...; covers +Inf
-    ex = huge(x) * 2.0
+    ex = huge(x)
+    ex = ex * 2.0                ! +Inf via runtime IEEE overflow (a constant
+                                 ! expression here is a compile error on gfortran)
   elseif (x < -746.0) then      ! exp underflows to zero past -745.2; covers -Inf
     ex = 0.0
   else

@@ -209,7 +209,8 @@ elemental module function exp2_pair(h, l) result(e2)
   integer :: n32, idx, n
 
   if (h > 1100.0) then
-    e2 = huge(h) * 2.0               ! +Inf, reproducibly
+    e2 = huge(h)                     ! +Inf via runtime IEEE overflow (a constant
+    e2 = e2 * 2.0                    ! expression here is a compile error on gfortran)
   elseif (h < -1130.0) then
     e2 = 0.0
   else

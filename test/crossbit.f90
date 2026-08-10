@@ -81,8 +81,12 @@ do set = 1, 6
   end select
 
   do i = 1, n
+    ! NaN-explicit clamp: min/max with a NaN operand is processor-dependent
+    ! (gfortran disagrees with ifx/nvfortran), so never clamp through them.
+    mm = y(i)
+    if (mm == mm) mm = min(max(mm, -800.0_real64), 800.0_real64)
     bits(i)     = canon( pow_reprod(x(i), y(i)) )
-    bits(n+i)   = canon( exp_reprod( min(max(y(i), -800.0_real64), 800.0_real64) ) )
+    bits(n+i)   = canon( exp_reprod(mm) )
     bits(2*n+i) = canon( log_reprod(x(i)) )
     bits(3*n+i) = canon( cuberoot(x(i)) )
   enddo
