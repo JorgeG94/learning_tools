@@ -9,12 +9,12 @@
 # -fp-model=precise / default nv flags: no FMA contraction surprises in the
 # candidates; the intrinsic side is measured however the compiler ships it.
 
-# -r8: the candidates follow MOM6's default-real convention (promoted to double).
+#: the candidates follow MOM6's default-real convention (promoted to double).
 FC_IFX   = ifx
-FL_IFX   = -O3 -xHost -ipo -r8 -fp-model=precise -no-fma
+FL_IFX   = -O3 -xHost -ipo -fp-model=precise -no-fma
 FC_NV    = mpifort
-FL_NV    = -O2 -r8 -Mnofma -Mnoflushz -Mnodaz
-FL_NVGPU = -O2 -r8 -Mnofma -Mnoflushz -Mnodaz -stdpar=gpu -mp=gpu -gpu=cc70,nofma,mem:separate,lto
+FL_NV    = -O2 -Mnofma -Mnoflushz -Mnodaz
+FL_NVGPU = -O2 -Mnofma -Mnoflushz -Mnodaz -stdpar=gpu -mp=gpu -gpu=cc70,nofma,mem:separate,lto
 
 MOD = src/bit_repro.f90 src/bit_repro_helpers.f90
 SRC = $(MOD) test/harness.f90
@@ -29,9 +29,9 @@ gpubit: ; $(FC_NV) $(FL_NVGPU) $(MOD) test/gpu_bitwise.f90 -o gpu_bitwise
 gpuperf: ; $(FC_NV) $(FL_NVGPU) $(MOD) test/gpu_perf.f90 -o gpu_perf
 crossbit_ifx: ; $(FC_IFX) $(FL_IFX) $(MOD) test/crossbit.f90 -o crossbit_ifx
 crossbit_nv:  ; $(FC_NV) $(FL_NV) $(MOD) test/crossbit.f90 -o crossbit_nv
-crossbit_gf: ; gfortran -O2 -fdefault-real-8 -ffp-contract=off $(MOD) test/crossbit.f90 -o crossbit_gf
+crossbit_gf: ; gfortran -O2 -ffp-contract=off $(MOD) test/crossbit.f90 -o crossbit_gf
 FLANG ?= /home/jorge/install/llvm/21.1.3/bin/flang
-crossbit_fl: ; $(FLANG) -O2 -fdefault-real-8 -ffp-contract=off $(MOD) test/crossbit.f90 -o crossbit_fl
+crossbit_fl: ; $(FLANG) -O2 -ffp-contract=off $(MOD) test/crossbit.f90 -o crossbit_fl
 
 # Generic CI leg: compiler and flags injected by the workflow (see
 # ../../.github/workflows/bitwise_repro.yml).  Verify with:
