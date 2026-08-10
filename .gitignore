@@ -5,3 +5,4 @@ harness_nvgpu
 gpu_bitwise
 *.mod
 *.smod
+gpu_perf
