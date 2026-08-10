@@ -279,7 +279,9 @@ elemental subroutine log2_dd(x, h, l)
   real :: s, sl      ! (m-1)/(m+1) as a dd pair
   real :: ph, pe     ! two_prod scratch
   real :: lh2, ll2   ! Leading term (2/ln2)*s as a dd pair
-  real :: s2, tail   ! s**2 and the series tail (double precision suffices)
+  real :: rv         ! 1/vh, so the routine needs only one division
+  real :: s2, s4, s8 ! Powers of s for the Estrin evaluation
+  real :: tail       ! The series tail (double precision suffices)
   real :: h1, l1     ! Intermediate dd sum
   integer :: k       ! Binary exponent of x
 
@@ -288,18 +290,21 @@ elemental subroutine log2_dd(x, h, l)
 
   u = m - 1.0                       ! exact: m in [0.70, 1.42)
   call two_sum(m, 1.0, vh, vl)      ! v = m + 1 exactly as (vh, vl)
-  s = u / vh
+  rv = 1.0 / vh                     ! one division for the whole routine
+  s = u * rv                        ! quotient to ~1 ulp ...
   call two_prod(s, vh, ph, pe)
-  sl = ((u - ph) - pe - s*vl) / vh  ! refine: (s, sl) = u/v to ~2**-107
+  sl = ((u - ph) - pe - s*vl) * rv  ! ... refined: (s, sl) = u/v to ~2**-105
 
   ! Leading term L = (2/ln2) * s in dd
   call two_prod(s, two_invln2_hi, lh2, ll2)
   ll2 = ll2 + (s*two_invln2_lo + sl*two_invln2_hi)
 
-  ! Series tail: L * s2*(a3 + s2*(a5 + ...)), |tail| <= 0.005, double is ample
-  s2 = s*s
-  tail = lh2 * (s2*(a3 + s2*(a5 + s2*(a7 + s2*(a9 + s2*(a11 + s2*(a13 + &
-         s2*(a15 + s2*(a17 + s2*(a19 + s2*a21))))))))))
+  ! Series tail: L * s2*P(s2), |tail| <= 0.005, double is ample.  P is evaluated
+  ! in a FIXED Estrin grouping (explicit parentheses; this order is part of the
+  ! reproducibility contract) to shorten the dependency chain.
+  s2 = s*s ; s4 = s2*s2 ; s8 = s4*s4
+  tail = lh2 * (s2 * ( ((a3 + s2*a5) + s4*(a7 + s2*a9)) + &
+                       s8*(((a11 + s2*a13) + s4*(a15 + s2*a17)) + s8*(a19 + s2*a21)) ))
 
   call two_sum(lh2, tail, h1, l1)
   l1 = l1 + ll2
@@ -307,39 +312,61 @@ elemental subroutine log2_dd(x, h, l)
   l = l + l1
 end subroutine log2_dd
 
-!> 2**(h+l) for a double-double exponent, |l| << 1: split off the integral part
-!! (exact), degree-14 polynomial for the fractional part, first-order correction
-!! in l, exact scale() by 2**n.  Overflow -> Inf, underflow -> 0/denormal.
+!> 2**(h+l) for a double-double exponent, |l| << 1.  Table-based reduction:
+!! h = n + i/32 + r with |r| <= 1/64, so 2**h = 2**n * T(i) * 2**r with T(i) a
+!! 32-entry double-double table and 2**r a short degree-6 polynomial.  The
+!! T(i)*poly product is carried through two_prod, keeping the assembly error
+!! near half an ulp.  Overflow -> Inf, underflow -> 0/denormal via scale().
 elemental function exp2_pair(h, l) result(e2)
   !$omp declare target
   real, intent(in) :: h  !< High part of the exponent
   real, intent(in) :: l  !< Low part of the exponent
   real :: e2             !< 2**(h+l)
 
-  ! Coefficients ln2**j / j! for 2**r = exp(r*ln2), Horner in r
+  ! T(i) = 2**(i/32) as double-double (generated at 60-digit precision)
+  real, parameter :: t2hi(0:31) = [ &
+    1.0, 1.0218971486541166, 1.0442737824274138, 1.0671404006768237, &
+    1.0905077326652577, 1.1143867425958924, 1.1387886347566916, 1.1637248587775775, &
+    1.189207115002721, 1.215247359980469, 1.241857812073484, 1.2690509571917332, &
+    1.2968395546510096, 1.3252366431597413, 1.3542555469368927, 1.383909881963832, &
+    1.4142135623730951, 1.4451808069770467, 1.4768261459394993, 1.5091644275934228, &
+    1.5422108254079407, 1.5759808451078865, 1.6104903319492543, 1.645755478153965, &
+    1.681792830507429, 1.718619298122478, 1.7562521603732995, 1.7947090750031072, &
+    1.8340080864093424, 1.8741676341103, 1.9152065613971474, 1.9571441241754002 ]
+  real, parameter :: t2lo(0:31) = [ &
+    0.0, 5.109225028973444e-17, 8.551889705537965e-17, -7.899853966841582e-17, &
+    -3.046782079812471e-17, 1.0410278456845571e-16, 8.912812676025408e-17, 3.8292048369240935e-17, &
+    3.982015231465646e-17, -7.712630692681488e-17, 4.658027591836937e-17, 2.667932131342186e-18, &
+    2.5382502794888315e-17, -2.8587312100388614e-17, 7.70094837980299e-17, -6.770511658794786e-17, &
+    -9.667293313452913e-17, -3.0237581349939873e-17, -3.483994556892796e-17, -1.016455327754295e-16, &
+    7.949834809697621e-17, -1.0136916471278304e-17, 2.4707192569797888e-17, -1.0125679913674773e-16, &
+    8.199010020581497e-17, -1.851380418263111e-17, 2.960140695448873e-17, 1.8227458427912087e-17, &
+    3.283107224245627e-17, -6.122763413004143e-17, -1.0619946056195963e-16, 8.960767791036668e-17 ]
+  ! Coefficients ln2**j / j! for 2**r over |r| <= 1/64
   real, parameter :: e2c1 = 0.6931471805599453,    e2c2 = 0.24022650695910072
   real, parameter :: e2c3 = 0.05550410866482158,   e2c4 = 0.009618129107628477
   real, parameter :: e2c5 = 0.0013333558146428443, e2c6 = 0.0001540353039338161
-  real, parameter :: e2c7 = 1.5252733804059841e-05, e2c8 = 1.321548679014431e-06
-  real, parameter :: e2c9 = 1.01780860092397e-07,  e2c10 = 7.054911620801123e-09
-  real, parameter :: e2c11 = 4.4455382718708116e-10, e2c12 = 2.5678435993488206e-11
-  real, parameter :: e2c13 = 1.3691488853904128e-12, e2c14 = 6.778726354822545e-14
-  real :: r  ! Fractional part of the exponent, in [-0.5, 0.5]
-  real :: p  ! Polynomial value of 2**r
-  integer :: n ! Integral part of the exponent
+  real :: w    ! h*32
+  real :: r    ! Fractional remainder of the exponent, |r| <= 1/64
+  real :: pp   ! Polynomial value of 2**r
+  real :: vh, vl ! two_prod parts of T(i)*pp
+  real :: corr ! Low-order correction: table low part and the l input
+  integer :: n32, idx, n
 
   if (h > 1100.0) then
     e2 = huge(h) * 2.0               ! +Inf, reproducibly
   elseif (h < -1130.0) then
     e2 = 0.0
   else
-    n = nint(h)
-    r = h - real(n)                  ! exact
-    p = 1.0 + r*(e2c1 + r*(e2c2 + r*(e2c3 + r*(e2c4 + r*(e2c5 + r*(e2c6 + &
-        r*(e2c7 + r*(e2c8 + r*(e2c9 + r*(e2c10 + r*(e2c11 + r*(e2c12 + &
-        r*(e2c13 + r*e2c14)))))))))))))
-    p = p + p*(l*e2c1)               ! 2**l ~ 1 + l*ln2, l ~ 2**-50
-    e2 = scale(p, n)
+    w = h * 32.0
+    n32 = nint(w)
+    r = h - real(n32) * 0.03125      ! exact: n32/32 is an exact multiple of 2**-5
+    idx = iand(n32, 31)              ! floor-consistent with the arithmetic shift:
+    n = shifta(n32, 5)               ! n32 = 32*n + idx, 0 <= idx < 32, any sign
+    pp = 1.0 + r*(e2c1 + r*(e2c2 + r*(e2c3 + r*(e2c4 + r*(e2c5 + r*e2c6)))))
+    corr = t2lo(idx) + t2hi(idx)*(l*e2c1)   ! 2**l ~ 1 + l*ln2, l ~ 2**-50
+    call two_prod(t2hi(idx), pp, vh, vl)
+    e2 = scale(vh + (vl + corr), n)
   endif
 end function exp2_pair
 
