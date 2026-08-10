@@ -16,7 +16,8 @@ FC_NV    = mpifort
 FL_NV    = -O2 -r8 -Mnofma -Mnoflushz -Mnodaz
 FL_NVGPU = -O2 -r8 -Mnofma -Mnoflushz -Mnodaz -stdpar=gpu -mp=gpu -gpu=cc70,nofma,mem:separate
 
-SRC = src/bit_repro.f90 test/harness.f90
+MOD = src/bit_repro.f90 src/bit_repro_impl.f90
+SRC = $(MOD) test/harness.f90
 
 ifx: ; $(FC_IFX) $(FL_IFX) $(SRC) -o harness_ifx
 nv:  ; $(FC_NV) $(FL_NV) $(SRC) -o harness_nv
@@ -24,4 +25,4 @@ nvgpu: ; $(FC_NV) $(FL_NVGPU) $(SRC) -o harness_nvgpu
 
 clean: ; rm -f harness_ifx harness_nv harness_nvgpu *.mod
 .PHONY: ifx nv nvgpu clean
-gpubit: ; $(FC_NV) $(FL_NVGPU) src/bit_repro.f90 test/gpu_bitwise.f90 -o gpu_bitwise
+gpubit: ; $(FC_NV) $(FL_NVGPU) $(MOD) test/gpu_bitwise.f90 -o gpu_bitwise
