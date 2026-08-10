@@ -7,7 +7,7 @@
 program gpu_bitwise
 
 use, intrinsic :: iso_fortran_env, only : int64, real64
-use bit_repro, only : exp_reprod, log_reprod, pow_reprod, cuberoot
+use bit_repro, only : exp_reprod, log_reprod, pow_reprod, cuberoot, erfc_reprod
 implicit none
 
 integer, parameter :: n = 1000000
@@ -95,6 +95,18 @@ do concurrent (i = 1:n)
   r_gpu(i) = cuberoot(x(i))
 enddo
 call check('cuberoot  +-')
+
+! --- erfc over the full working range ----------------------------------------
+do i = 1, n
+  x(i) = -7.0_real64 + 36.0_real64 * rand01()
+enddo
+do i = 1, n
+  r_cpu(i) = erfc_reprod(x(i))
+enddo
+do concurrent (i = 1:n)
+  r_gpu(i) = erfc_reprod(x(i))
+enddo
+call check('erfc  [-7, 29]')
 
 ! --- specials through pow ----------------------------------------------------
 call specials_set()

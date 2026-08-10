@@ -15,7 +15,7 @@
 program fingerprint
 
 use, intrinsic :: iso_fortran_env, only : int64, real64
-use bit_repro, only : exp_reprod, log_reprod, pow_reprod, cuberoot
+use bit_repro, only : exp_reprod, log_reprod, pow_reprod, cuberoot, erfc_reprod
 implicit none
 
 real(real64) :: a, b, c, z, p, e
@@ -75,6 +75,13 @@ call pr('pow_gen  ', pow_reprod(3.0_real64, 0.3_real64))
 call pr('pow_meke ', pow_reprod(3.0_real64, 0.25_real64))
 call pr('pow_big  ', pow_reprod(1.5_real64, 800.0_real64))
 call pr('cbrt     ', cuberoot(7.0_real64))
+call pr('ef_mac   ', erfc_reprod(0.3_real64))
+call pr('ef_bandB ', erfc_reprod(1.3_real64))
+call pr('ef_bandC ', erfc_reprod(4.5_real64))
+call pr('ef_asym  ', erfc_reprod(12.0_real64))
+call pr('ef_deep  ', erfc_reprod(27.0_real64))
+call pr('ef_neg   ', erfc_reprod(-3.0_real64))
+call pr('ef_two   ', erfc_reprod(-27.0_real64))
 
 ! --- cuberoot over the full specials list (the macOS arm64 divergence is
 ! --- isolated to set6-cbrt; these name the exact special and its value) ------

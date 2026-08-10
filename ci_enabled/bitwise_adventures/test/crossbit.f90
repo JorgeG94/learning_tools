@@ -15,7 +15,7 @@ program crossbit
 use, intrinsic :: iso_fortran_env, only : int64, real64
 use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_positive_inf, &
                                           ieee_negative_inf, ieee_quiet_nan
-use bit_repro, only : exp_reprod, log_reprod, pow_reprod, cuberoot
+use bit_repro, only : exp_reprod, log_reprod, pow_reprod, cuberoot, erfc_reprod
 implicit none
 
 integer, parameter :: n = 200000
@@ -23,12 +23,12 @@ real(real64), allocatable :: x(:), y(:)
 integer(int64), allocatable :: bits(:)
 integer(int64) :: seed_state
 character(len=64) :: tag
-character(len=4), parameter :: fnames(4) = ['pow ','exp ','log ','cbrt']
+character(len=4), parameter :: fnames(5) = ['pow ','exp ','log ','cbrt','erfc']
 integer :: i, u, set, ee
 real(real64) :: mm
 integer(int64) :: rr
 
-allocate(x(n), y(n), bits(4*n))
+allocate(x(n), y(n), bits(5*n))
 seed_state = 88172645463325252_int64
 call get_command_argument(1, tag)
 if (len_trim(tag) == 0) tag = 'out'
@@ -90,10 +90,11 @@ do set = 1, 6
     bits(n+i)   = canon( exp_reprod(mm) )
     bits(2*n+i) = canon( log_reprod(x(i)) )
     bits(3*n+i) = canon( cuberoot(x(i)) )
+    bits(4*n+i) = canon( erfc_reprod(y(i)) )   ! total function: no clamp needed
   enddo
   ! per-set, per-function xor-fold: localizes a cross-platform divergence to a
   ! (set, function) cell straight from the CI log
-  do i = 0, 3
+  do i = 0, 4
     print '(2x,a,i0,2x,a,2x,z16.16)', 'set', set, fnames(i+1), &
       xorfold(bits(i*n+1 : (i+1)*n))
   enddo

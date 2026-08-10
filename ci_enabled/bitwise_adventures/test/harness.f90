@@ -13,7 +13,7 @@
 program harness
 
 use, intrinsic :: iso_fortran_env, only : int64, real64, real128
-use bit_repro, only : exp_reprod, log_reprod, pow_reprod, pow_reprod_explog, cuberoot
+use bit_repro, only : exp_reprod, log_reprod, pow_reprod, pow_reprod_explog, cuberoot, erfc_reprod
 implicit none
 
 integer, parameter :: n = 2000000
@@ -81,6 +81,22 @@ do i = 1, n
   xs(i) = sign( exp( -690.0_real64 + 1380.0_real64 * rand01() ), rand01() - 0.5_real64 )
 enddo
 call accuracy_cbrt('cuberoot  +- log-uniform', xs)
+
+! ---------------- erfc ----------------------------------------------------------
+do i = 1, n
+  xs(i) = 6.5_real64 * rand01()                       ! MOM6 range: erfc(sqrt(...)) >= 0
+enddo
+call accuracy_erfc('erfc [0, 6.5] (MOM6/wave range)', xs)
+
+do i = 1, n
+  xs(i) = -6.5_real64 + 34.0_real64 * rand01()        ! full working range incl. tail
+enddo
+call accuracy_erfc('erfc [-6.5, 27.5] (full range)', xs)
+
+do i = 1, n
+  xs(i) = sign( 0.47_real64 * rand01(), rand01() - 0.5_real64 )  ! Maclaurin band, +-
+enddo
+call accuracy_erfc('erfc [-0.47, 0.47] (Maclaurin band)', xs)
 
 ! ---------------- pow round-trip property --------------------------------------
 call roundtrip_pow2()
@@ -202,6 +218,22 @@ subroutine accuracy_pow(name, x, y)
   enddo
   call tally(name, 'reprod(v2)', out1, out2, size(x))
 end subroutine accuracy_pow
+
+subroutine accuracy_erfc(name, x)
+  character(*), intent(in) :: name
+  real(real64), intent(in) :: x(:)
+  integer :: k
+  do k = 1, size(x)
+    out1(k) = real( erfc(real(x(k), real128)), real64 )
+    out2(k) = erfc(x(k))
+  enddo
+  print '(/,a)', trim(name)
+  call tally(name, 'intrinsic', out1, out2, size(x))
+  do k = 1, size(x)
+    out2(k) = erfc_reprod(x(k))
+  enddo
+  call tally(name, 'reprod', out1, out2, size(x))
+end subroutine accuracy_erfc
 
 subroutine accuracy_cbrt(name, x)
   character(*), intent(in) :: name
@@ -332,6 +364,14 @@ subroutine bench_log_pow_cbrt(x, y)
   do rep = 1, reps ; do k = 1, size(x) ; s = s + cuberoot(x(k)) ; enddo ; enddo
   call system_clock(t1)
   print '(2x,a,f8.2,a,es22.15,a)', 'cbrt  reprod:    ', 1.0e9*real(t1-t0)/real(rate)/real(size(x))/reps, '  (chk ', s, ')'
+  s = 0.0 ; call system_clock(t0, rate)
+  do rep = 1, reps ; do k = 1, size(x) ; s = s + erfc(abs(x(k))**0.1_real64) ; enddo ; enddo
+  call system_clock(t1)
+  print '(2x,a,f8.2,a,es22.15,a)', 'erfc  intrinsic: ', 1.0e9*real(t1-t0)/real(rate)/real(size(x))/reps, '  (chk ', s, ')'
+  s = 0.0 ; call system_clock(t0, rate)
+  do rep = 1, reps ; do k = 1, size(x) ; s = s + erfc_reprod(abs(x(k))**0.1_real64) ; enddo ; enddo
+  call system_clock(t1)
+  print '(2x,a,f8.2,a,es22.15,a)', 'erfc  reprod:    ', 1.0e9*real(t1-t0)/real(rate)/real(size(x))/reps, '  (chk ', s, ')'
 end subroutine bench_log_pow_cbrt
 
 end program harness
