@@ -66,9 +66,10 @@ jobs:
           - name: ifx / windows (experimental)
             os: windows-latest
             toolchain: {compiler: intel, version: '2025.0'}
-            # dash-style flags: ifx's LLVM driver accepts them on Windows too,
-            # and git-bash path-mangles /O2-style flags into C:/Program Files/...
-            flags: -O2 -fp-model=precise -no-fma -no-ftz
+            # native /Q spellings -- ifx on Windows did NOT honor the dash-style
+            # forms (fast-math symptoms: FTZ + fused ulp drift); the env vars
+            # below stop git-bash from path-mangling the slashes
+            flags: /O2 /fp:precise /Qfma- /Qftz-
             experimental: true
           - name: aocc flang-classic (experimental)
             os: ubuntu-latest
@@ -84,6 +85,9 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      MSYS_NO_PATHCONV: '1'
+      MSYS2_ARG_CONV_EXCL: '*'
     steps:
       - uses: actions/checkout@v4
 
