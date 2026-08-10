@@ -11,7 +11,7 @@
 
 # -r8: the candidates follow MOM6's default-real convention (promoted to double).
 FC_IFX   = ifx
-FL_IFX   = -O2 -r8 -fp-model=precise
+FL_IFX   = -O2 -r8 -fp-model=precise -no-fma
 FC_NV    = mpifort
 FL_NV    = -O2 -r8 -Mnofma
 FL_NVGPU = -O2 -r8 -Mnofma -stdpar=gpu -mp=gpu -gpu=cc70,nofma,mem:separate

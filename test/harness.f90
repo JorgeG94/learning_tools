@@ -13,7 +13,7 @@
 program harness
 
 use, intrinsic :: iso_fortran_env, only : int64, real64, real128
-use bit_repro, only : exp_reprod, log_reprod, pow_reprod, cuberoot
+use bit_repro, only : exp_reprod, log_reprod, pow_reprod, pow_reprod_explog, cuberoot
 implicit none
 
 integer, parameter :: n = 2000000
@@ -63,6 +63,18 @@ do i = 1, n
   ys(i) = -3.0_real64 + 6.0_real64 * rand01()                ! general small exponents
 enddo
 call accuracy_pow('pow  x**y, y in [-3,3]', xs, ys)
+
+do i = 1, n
+  xs(i) = exp( -30.0_real64 + 60.0_real64 * rand01() )
+  ys(i) = real( 2 + mod(i, 7), real64 )                     ! integral y in [2,8]
+enddo
+call accuracy_pow('pow  x**n, n integral 2..8', xs, ys)
+
+do i = 1, n
+  xs(i) = exp( -30.0_real64 + 60.0_real64 * rand01() )
+  ys(i) = 1.5_real64 * merge(1.0_real64, -1.0_real64, mod(i,2)==0)  ! y = +-1.5
+enddo
+call accuracy_pow('pow  x**(+-1.5) (half-integral)', xs, ys)
 
 ! ---------------- cuberoot ------------------------------------------------------
 do i = 1, n
@@ -182,9 +194,13 @@ subroutine accuracy_pow(name, x, y)
   print '(/,a)', trim(name)
   call tally(name, 'intrinsic', out1, out2, size(x))
   do k = 1, size(x)
+    out2(k) = pow_reprod_explog(x(k), y(k))
+  enddo
+  call tally(name, 'explog(old)', out1, out2, size(x))
+  do k = 1, size(x)
     out2(k) = pow_reprod(x(k), y(k))
   enddo
-  call tally(name, 'reprod', out1, out2, size(x))
+  call tally(name, 'reprod(v2)', out1, out2, size(x))
 end subroutine accuracy_pow
 
 subroutine accuracy_cbrt(name, x)
@@ -236,6 +252,15 @@ subroutine specials()
   print '(2x,a,es13.5,a,es13.5)', 'log(0):     ', log_reprod(pzero), ' | ', log(pzero)
   print '(2x,a,es13.5,a,es13.5)', 'log(+Inf):  ', log_reprod(pinf), ' | ', log(pinf)
   print '(2x,a,es13.5,a,es13.5)', 'log(denorm):', log_reprod(denorm), ' | ', log(denorm)
+  print '(2x,a,es13.5,a,es13.5)', 'pow(x,0):   ', pow_reprod(qnan, 0.0_real64), ' | ', qnan**0.0_real64
+  print '(2x,a,es13.5,a,es13.5)', 'pow(0,-2):  ', pow_reprod(0.0_real64, -2.0_real64), ' | ', 0.0_real64**(-2.0_real64)
+  print '(2x,a,es13.5,a,es13.5)', 'pow(-0,3):  ', pow_reprod(nzero, 3.0_real64), ' | ', nzero**3.0_real64
+  print '(2x,a,es13.5,a,es13.5)', 'pow(-2,3):  ', pow_reprod(-2.0_real64, 3.0_real64), ' | ', (-2.0_real64)**3.0_real64
+  print '(2x,a,es13.5,a,es13.5)', 'pow(-2,.5): ', pow_reprod(-2.0_real64, 0.5_real64), ' | ', sqrt(qnan)
+  print '(2x,a,es13.5,a,es13.5)', 'pow(-1,Inf):', pow_reprod(-1.0_real64, pinf), ' | ', 1.0_real64
+  print '(2x,a,es13.5,a,es13.5)', 'pow(.5,-If):', pow_reprod(0.5_real64, ninf), ' | ', pinf
+  print '(2x,a,es13.5,a,es13.5)', 'pow(2,1e3): ', pow_reprod(2.0_real64, 1.0e3_real64), ' | ', 2.0_real64**1.0e3_real64
+  print '(2x,a,es13.5,a,es13.5)', 'pow(2,-1e9):', pow_reprod(2.0_real64, -1.0e9_real64), ' | ', 2.0_real64**(-1.0e9_real64)
   print '(2x,a,es13.5,a,es13.5)', 'cbrt(-8):   ', cuberoot(-8.0_real64), ' | ', -2.0_real64
   print '(2x,a,es13.5,a,es13.5)', 'cbrt(-0):   ', cuberoot(nzero), ' | ', nzero
   print '(2x,a,es13.5,a,es13.5)', 'cbrt(NaN):  ', cuberoot(qnan), ' | ', qnan
@@ -284,9 +309,21 @@ subroutine bench_log_pow_cbrt(x, y)
   call system_clock(t1)
   print '(2x,a,f8.2,a,es22.15,a)', 'pow   intrinsic: ', 1.0e9*real(t1-t0)/real(rate)/real(size(x))/reps, '  (chk ', s, ')'
   s = 0.0 ; call system_clock(t0, rate)
+  do rep = 1, reps ; do k = 1, size(x) ; s = s + pow_reprod_explog(x(k), y(k)) ; enddo ; enddo
+  call system_clock(t1)
+  print '(2x,a,f8.2,a,es22.15,a)', 'pow   explog:    ', 1.0e9*real(t1-t0)/real(rate)/real(size(x))/reps, '  (chk ', s, ')'
+  s = 0.0 ; call system_clock(t0, rate)
   do rep = 1, reps ; do k = 1, size(x) ; s = s + pow_reprod(x(k), y(k)) ; enddo ; enddo
   call system_clock(t1)
-  print '(2x,a,f8.2,a,es22.15,a)', 'pow   reprod:    ', 1.0e9*real(t1-t0)/real(rate)/real(size(x))/reps, '  (chk ', s, ')'
+  print '(2x,a,f8.2,a,es22.15,a)', 'pow   reprod v2: ', 1.0e9*real(t1-t0)/real(rate)/real(size(x))/reps, '  (chk ', s, ')'
+  s = 0.0 ; call system_clock(t0, rate)
+  do rep = 1, reps ; do k = 1, size(x) ; s = s + x(k)**0.25_real64 ; enddo ; enddo
+  call system_clock(t1)
+  print '(2x,a,f8.2,a,es22.15,a)', 'p.25  intrinsic: ', 1.0e9*real(t1-t0)/real(rate)/real(size(x))/reps, '  (chk ', s, ')'
+  s = 0.0 ; call system_clock(t0, rate)
+  do rep = 1, reps ; do k = 1, size(x) ; s = s + pow_reprod(x(k), 0.25_real64) ; enddo ; enddo
+  call system_clock(t1)
+  print '(2x,a,f8.2,a,es22.15,a)', 'p.25  reprod v2: ', 1.0e9*real(t1-t0)/real(rate)/real(size(x))/reps, '  (chk ', s, ')'
   s = 0.0 ; call system_clock(t0, rate)
   do rep = 1, reps ; do k = 1, size(x) ; s = s + sign(abs(x(k))**(1.0_real64/3.0_real64), x(k)) ; enddo ; enddo
   call system_clock(t1)
