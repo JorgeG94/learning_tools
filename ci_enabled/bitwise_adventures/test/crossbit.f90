@@ -159,14 +159,17 @@ subroutine specials_fill()
   enddo
 end subroutine specials_fill
 
-!> XOR-fold of a bits array, position-salted so permutations also show.
+!> XOR-fold of a bits array, position-salted so permutations also show.  The
+!! salt is 1+mod(k,7): never zero (v xor ishft(v,0) = 0 would blind the fold to
+!! every element at that residue -- a real blind spot that hid the macOS set-6
+!! divergence), and coprime to the 144-period specials pattern.
 pure function xorfold(bb) result(f)
   integer(int64), intent(in) :: bb(:)
   integer(int64) :: f
   integer :: k
   f = 0_int64
   do k = 1, size(bb)
-    f = ieor(ieor(f, bb(k)), ishft(bb(k), mod(k, 8)))
+    f = ieor(ieor(f, bb(k)), ishft(bb(k), 1 + mod(k, 7)))
   enddo
 end function xorfold
 
