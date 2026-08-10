@@ -15,6 +15,47 @@ integer(kind=int64), parameter :: bias = 1023_int64 !< Exponent bias
 
 contains
 
+!> exponent()/fraction() split that is well-defined for denormal x > 0 on every
+!! compiler: denormals are pre-scaled by 2**54 (an exact multiply) first, because
+!! the intrinsics' behavior on denormals is processor-dependent (and wrong under
+!! nvfortran).  For normal x this is bit-identical to the plain intrinsics.
+elemental module subroutine norm_split(x, m, k)
+  !$omp declare target
+  real, intent(in)  :: x  !< The argument, x > 0, finite
+  real, intent(out) :: m  !< fraction(x), in [0.5, 1)
+  integer, intent(out) :: k !< exponent(x), corrected for denormals
+  real, parameter :: two_p54 = 18014398509481984.0  ! 2**54, exact
+  real :: xn
+  integer :: kb
+  xn = x ; kb = 0
+  if (xn < tiny(xn)) then ; xn = xn * two_p54 ; kb = -54 ; endif
+  k = exponent(xn) + kb ; m = fraction(xn)
+end subroutine norm_split
+
+!> scale(v, n) with reproducible behavior at BOTH edges of the exponent range:
+!! Fortran leaves SCALE processor-dependent outside the model, and nvfortran
+!! (a) flushes denormal results to zero where ifx rounds them, and (b) returns
+!! Inf for n > 1023 even when v < 1 makes the result representable (measured:
+!! exp(709.774) -> Inf under nv, correct 1.78e308 under ifx).  The last 64
+!! doublings/halvings are therefore done with one IEEE multiply by an exact
+!! power of two, which every conforming platform rounds -- and overflows --
+!! identically.
+elemental function scale_reprod(v, n) result(sv)
+  !$omp declare target
+  real, intent(in) :: v     !< The value to be scaled, |v| in ~[0.5, 2.5)
+  integer, intent(in) :: n  !< The power of two to scale by
+  real :: sv                !< v * 2**n, correctly rounded incl. denormals/overflow
+  real, parameter :: two_m64 = 2.0**(-64)  ! exact
+  real, parameter :: two_p64 = 2.0**64     ! exact
+  if (n > 960) then
+    sv = scale(v, n - 64) * two_p64
+  elseif (n >= -960) then
+    sv = scale(v, n)
+  else
+    sv = scale(v, n + 64) * two_m64
+  endif
+end function scale_reprod
+
 !> x**n for n >= 0 by binary exponentiation: pure IEEE multiplies, so it is
 !! reproducible everywhere, and ipow(x,2) == RN(x*x) exactly.
 elemental module function ipow(x, n) result(p)
@@ -41,15 +82,6 @@ elemental module function ipow(x, n) result(p)
   if (n < 0) p = 1.0 / p
 end function ipow
 
-!> ipow with negative exponents allowed (wrapper name kept separate so the hot
-!! integral path in pow_reprod stays branch-light).
-elemental module function ipow_signed(x, n) result(p)
-  !$omp declare target
-  real, intent(in) :: x
-  integer, intent(in) :: n
-  real :: p
-  p = ipow(x, n)
-end function ipow_signed
 
 !> Knuth two_sum: s + e == a + b exactly, branch-free.
 elemental module subroutine two_sum(a, b, s, e)
@@ -109,7 +141,7 @@ elemental module subroutine log2_dd(x, h, l)
   real :: h1, l1     ! Intermediate dd sum
   integer :: k       ! Binary exponent of x
 
-  k = exponent(x) ; m = fraction(x)
+  call norm_split(x, m, k)
   if (m < sqrt2_2) then ; m = m + m ; k = k - 1 ; endif
 
   u = m - 1.0                       ! exact: m in [0.70, 1.42)
@@ -172,8 +204,7 @@ elemental module function exp2_pair(h, l) result(e2)
   real, parameter :: e2c5 = 0.0013333558146428443, e2c6 = 0.0001540353039338161
   real :: w    ! h*32
   real :: r    ! Fractional remainder of the exponent, |r| <= 1/64
-  real :: pp   ! Polynomial value of 2**r
-  real :: vh, vl ! two_prod parts of T(i)*pp
+  real :: q    ! 2**r - 1 from the polynomial, |q| <= 0.011
   real :: corr ! Low-order correction: table low part and the l input
   integer :: n32, idx, n
 
@@ -187,10 +218,12 @@ elemental module function exp2_pair(h, l) result(e2)
     r = h - real(n32) * 0.03125      ! exact: n32/32 is an exact multiple of 2**-5
     idx = iand(n32, 31)              ! n32 = 32*n + idx with 0 <= idx < 32 for any
     n = (n32 - idx) / 32             ! sign; the division is exact (nvfortran has no shifta)
-    pp = 1.0 + r*(e2c1 + r*(e2c2 + r*(e2c3 + r*(e2c4 + r*(e2c5 + r*e2c6)))))
+    ! q = 2**r - 1, never materializing the 1: the assembly T + (T*q + corr)
+    ! keeps every small term at its own scale, so the only half-ulp rounding is
+    ! the final addition, and the l correction is scaled by the full product.
+    q = r*(e2c1 + r*(e2c2 + r*(e2c3 + r*(e2c4 + r*(e2c5 + r*e2c6)))))
     corr = t2lo(idx) + t2hi(idx)*(l*e2c1)   ! 2**l ~ 1 + l*ln2, l ~ 2**-50
-    call two_prod(t2hi(idx), pp, vh, vl)
-    e2 = scale(vh + (vl + corr), n)
+    e2 = scale_reprod(t2hi(idx) + (t2hi(idx)*q + corr), n)
   endif
 end function exp2_pair
 

@@ -6,3 +6,6 @@ gpu_bitwise
 *.mod
 *.smod
 gpu_perf
+crossbit_ifx
+crossbit_nv
+crossbit_*.bin

@@ -11,7 +11,7 @@
 
 # -r8: the candidates follow MOM6's default-real convention (promoted to double).
 FC_IFX   = ifx
-FL_IFX   = -O2 -r8 -fp-model=precise -no-fma
+FL_IFX   = -O3 -xHost -ipo -r8 -fp-model=precise -no-fma
 FC_NV    = mpifort
 FL_NV    = -O2 -r8 -Mnofma -Mnoflushz -Mnodaz
 FL_NVGPU = -O2 -r8 -Mnofma -Mnoflushz -Mnodaz -stdpar=gpu -mp=gpu -gpu=cc70,nofma,mem:separate,lto
@@ -24,6 +24,8 @@ nv:  ; $(FC_NV) $(FL_NV) $(SRC) -o harness_nv
 nvgpu: ; $(FC_NV) $(FL_NVGPU) $(SRC) -o harness_nvgpu
 
 clean: ; rm -f harness_ifx harness_nv harness_nvgpu *.mod
-.PHONY: ifx nv nvgpu clean
+.PHONY: ifx nv nvgpu clean gpubit gpuperf crossbit_ifx crossbit_nv
 gpubit: ; $(FC_NV) $(FL_NVGPU) $(MOD) test/gpu_bitwise.f90 -o gpu_bitwise
 gpuperf: ; $(FC_NV) $(FL_NVGPU) $(MOD) test/gpu_perf.f90 -o gpu_perf
+crossbit_ifx: ; $(FC_IFX) $(FL_IFX) $(MOD) test/crossbit.f90 -o crossbit_ifx
+crossbit_nv:  ; $(FC_NV) $(FL_NV) $(MOD) test/crossbit.f90 -o crossbit_nv
