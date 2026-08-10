@@ -67,6 +67,16 @@ jobs:
           $FC ${{ matrix.flags }} src/bit_repro.f90 src/bit_repro_helpers.f90 \
             test/crossbit.f90 -o crossbit_ci
 
+      - name: Fingerprint (mechanism canaries; compare with REFERENCE_FINGERPRINT.txt)
+        working-directory: ci_enabled/bitwise_adventures
+        env:
+          FC: ${{ steps.setup-fortran.outputs.fc }}
+        run: |
+          $FC ${{ matrix.flags }} src/bit_repro.f90 src/bit_repro_helpers.f90             test/fingerprint.f90 -o fingerprint_ci
+          ./fingerprint_ci
+          echo "--- reference (golden-passing legs print exactly this):"
+          cat REFERENCE_FINGERPRINT.txt
+
       - name: Run and verify against the golden bits
         working-directory: ci_enabled/bitwise_adventures
         run: |
