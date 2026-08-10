@@ -50,6 +50,38 @@ jobs:
             os: ubuntu-latest
             toolchain: {compiler: nvidia-hpc, version: '25.5'}
             flags: -O2 -r8 -Mnofma -Mnoflushz -Mnodaz
+          - name: gcc-13 / linux arm64
+            os: ubuntu-24.04-arm
+            toolchain: {compiler: gcc, version: '13'}
+            flags: -O2 -fdefault-real-8 -ffp-contract=off
+          - name: gcc / windows
+            os: windows-latest
+            toolchain: {compiler: gcc, version: '13'}
+            flags: -O2 -fdefault-real-8 -ffp-contract=off
+          - name: intel-classic ifort / x86_64
+            os: ubuntu-latest
+            toolchain: {compiler: intel-classic, version: '2021.10'}
+            flags: -O2 -r8 -fp-model precise -no-fma -no-ftz
+          # --- experimental tier: allowed to fail, each failure is a finding ---
+          - name: ifx / windows (experimental)
+            os: windows-latest
+            toolchain: {compiler: intel, version: '2025.0'}
+            flags: /O2 /real-size:64 /fp:precise /Qfma- /Qftz-
+            experimental: true
+          - name: aocc flang-classic (experimental)
+            os: ubuntu-latest
+            toolchain: {compiler: aocc, version: '5.1.0'}
+            flags: -O2 -r8 -ffp-contract=off
+            experimental: true
+          - name: lfortran (experimental)
+            os: ubuntu-latest
+            toolchain: {compiler: lfortran, version: '0.45.0'}
+            flags: ''
+            experimental: true
+    continue-on-error: ${{ matrix.experimental || false }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
