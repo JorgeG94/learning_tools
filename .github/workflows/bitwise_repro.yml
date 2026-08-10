@@ -76,7 +76,7 @@ jobs:
           - name: lfortran (experimental)
             os: ubuntu-latest
             toolchain: {compiler: lfortran, version: '0.45.0'}
-            flags: ''
+            flags: -fdefault-real-8
             experimental: true
     continue-on-error: ${{ matrix.experimental || false }}
     defaults:
