@@ -13,7 +13,7 @@
 program harness
 
 use, intrinsic :: iso_fortran_env, only : int64, real64, real128
-use bit_repro, only : exp_reprod, log_reprod, pow_reprod, pow_reprod_explog, cuberoot, erfc_reprod, erfc_reprod_bf
+use bit_repro, only : exp_reprod, log_reprod, pow_reprod, pow_reprod_explog, cuberoot, erfc_reprod, erfc_reprod_bf, erfc_reprod_v
 implicit none
 
 integer, parameter :: n = 2000000
@@ -287,6 +287,24 @@ subroutine erfc_bf_lockstep()
     print '(4x,a)', 'ACCURACY REGRESSION: erfc_bf drifted from erfc_reprod'
     n_violations = n_violations + 1
   endif
+  ! the 8-wide kernel too (odd count exercises its scalar tail)
+  block
+    real(real64) :: xv8(100001), rv8(100001)
+    integer :: kk
+    do kk = 1, size(xv8)
+      xv8(kk) = -30.0_real64 + 60.0_real64 * rand01()
+    enddo
+    call erfc_reprod_v(xv8, rv8)
+    nbad = 0
+    do kk = 1, size(xv8)
+      if (transfer(erfc_reprod(xv8(kk)), 1_int64) /= transfer(rv8(kk), 1_int64)) nbad = nbad + 1
+    enddo
+    print '(a,i0)', 'erfc branchy-vs-8-wide lockstep diffs: ', nbad
+    if (nbad /= 0) then
+      print '(4x,a)', 'ACCURACY REGRESSION: erfc_v drifted from erfc_reprod'
+      n_violations = n_violations + 1
+    endif
+  end block
 end subroutine erfc_bf_lockstep
 
 subroutine roundtrip_pow2()
