@@ -81,6 +81,8 @@ jobs:
         working-directory: ci_enabled/bitwise_adventures
         run: |
           ./crossbit_ci ci
+          echo "--- reference per-set/function cells (from a golden-passing leg):"
+          cat REFERENCE_CELLS.txt
           got=$(python3 -c "import hashlib;print(hashlib.sha256(open('crossbit_ci.bin','rb').read()).hexdigest())")
           want=$(cut -d' ' -f1 GOLDEN.sha256)
           echo "golden: $want"

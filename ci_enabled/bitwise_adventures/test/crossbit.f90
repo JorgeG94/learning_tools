@@ -23,6 +23,7 @@ real(real64), allocatable :: x(:), y(:)
 integer(int64), allocatable :: bits(:)
 integer(int64) :: seed_state
 character(len=64) :: tag
+character(len=4), parameter :: fnames(4) = ['pow ','exp ','log ','cbrt']
 integer :: i, u, set, ee
 real(real64) :: mm
 integer(int64) :: rr
@@ -90,6 +91,12 @@ do set = 1, 6
     bits(2*n+i) = canon( log_reprod(x(i)) )
     bits(3*n+i) = canon( cuberoot(x(i)) )
   enddo
+  ! per-set, per-function xor-fold: localizes a cross-platform divergence to a
+  ! (set, function) cell straight from the CI log
+  do i = 0, 3
+    print '(2x,a,i0,2x,a,2x,z16.16)', 'set', set, fnames(i+1), &
+      xorfold(bits(i*n+1 : (i+1)*n))
+  enddo
   write(u) bits
 enddo
 close(u)
@@ -151,6 +158,17 @@ subroutine specials_fill()
     y(k) = vals(1 + mod(k/12, 12))
   enddo
 end subroutine specials_fill
+
+!> XOR-fold of a bits array, position-salted so permutations also show.
+pure function xorfold(bb) result(f)
+  integer(int64), intent(in) :: bb(:)
+  integer(int64) :: f
+  integer :: k
+  f = 0_int64
+  do k = 1, size(bb)
+    f = ieor(ieor(f, bb(k)), ishft(bb(k), mod(k, 8)))
+  enddo
+end function xorfold
 
 !> Raw bits with NaN canonicalized (payloads are not part of the contract).
 function canon(v) result(b)
