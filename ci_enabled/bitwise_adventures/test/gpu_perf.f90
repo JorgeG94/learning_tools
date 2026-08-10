@@ -5,7 +5,7 @@
 program gpu_perf
 
 use, intrinsic :: iso_fortran_env, only : int64, real64
-use bit_repro, only : exp_reprod, pow_reprod, erfc_reprod
+use bit_repro, only : exp_reprod, pow_reprod, erfc_reprod, log_reprod, cuberoot
 implicit none
 
 integer, parameter :: n = 4000000
@@ -41,6 +41,15 @@ do i = 1, n
   x(i) = 8.0_real64 * rand01()
 enddo
 call bench_erfc('erfc        ')
+
+do i = 1, n
+  x(i) = exp( -300.0_real64 + 600.0_real64 * rand01() )
+enddo
+call bench_log('log         ')
+do i = 1, n
+  x(i) = sign(x(i), rand01() - 0.5_real64)
+enddo
+call bench_cbrt('cbrt        ')
 
 contains
 
@@ -99,6 +108,40 @@ subroutine bench_erfc(name)
     1.0e9_real64*real(t1-t0,real64)/real(rate,real64)/real(n,real64)/real(reps,real64), &
     '   (chk ', chk, ')'
 end subroutine bench_erfc
+
+subroutine bench_log(name)
+  character(*), intent(in) :: name
+  integer(int64) :: t0, t1, rate
+  real(real64) :: chk
+  integer :: k, rep
+  do concurrent (k = 1:n) ; r(k) = log_reprod(x(k)) ; enddo
+  call system_clock(t0, rate)
+  do rep = 1, reps
+    do concurrent (k = 1:n) ; r(k) = log_reprod(x(k)) ; enddo
+  enddo
+  call system_clock(t1)
+  chk = 0.0_real64
+  do k = 1, n ; chk = chk + r(k) ; enddo
+  print '(2x,a,f8.3,a,es22.15,a)', name//' ns/elem: ', &
+    1.0e9_real64*real(t1-t0,real64)/real(rate,real64)/real(n,real64)/real(reps,real64), '   (chk ', chk, ')'
+end subroutine bench_log
+
+subroutine bench_cbrt(name)
+  character(*), intent(in) :: name
+  integer(int64) :: t0, t1, rate
+  real(real64) :: chk
+  integer :: k, rep
+  do concurrent (k = 1:n) ; r(k) = cuberoot(x(k)) ; enddo
+  call system_clock(t0, rate)
+  do rep = 1, reps
+    do concurrent (k = 1:n) ; r(k) = cuberoot(x(k)) ; enddo
+  enddo
+  call system_clock(t1)
+  chk = 0.0_real64
+  do k = 1, n ; chk = chk + r(k) ; enddo
+  print '(2x,a,f8.3,a,es22.15,a)', name//' ns/elem: ', &
+    1.0e9_real64*real(t1-t0,real64)/real(rate,real64)/real(n,real64)/real(reps,real64), '   (chk ', chk, ')'
+end subroutine bench_cbrt
 
 subroutine bench_exp(name)
   character(*), intent(in) :: name
