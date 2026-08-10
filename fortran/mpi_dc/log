@@ -1,0 +1,7 @@
+Ranks      : 4
+Matrix size: 10000
+Rank 3: time =    9.716 s,  GFLOP/s =     205.85
+Rank 1: time =    9.716 s,  GFLOP/s =     205.85
+Rank 2: time =    9.716 s,  GFLOP/s =     205.85
+Rank 0 checksum:   1.280007E+06
+Rank 0: time =    9.716 s,  GFLOP/s =     205.85

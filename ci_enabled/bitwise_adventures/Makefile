@@ -32,3 +32,10 @@ crossbit_nv:  ; $(FC_NV) $(FL_NV) $(MOD) test/crossbit.f90 -o crossbit_nv
 crossbit_gf: ; gfortran -O2 -fdefault-real-8 -ffp-contract=off $(MOD) test/crossbit.f90 -o crossbit_gf
 FLANG ?= /home/jorge/install/llvm/21.1.3/bin/flang
 crossbit_fl: ; $(FLANG) -O2 -fdefault-real-8 -ffp-contract=off $(MOD) test/crossbit.f90 -o crossbit_fl
+
+# Generic CI leg: compiler and flags injected by the workflow (see
+# ../../.github/workflows/bitwise_repro.yml).  Verify with:
+#   python3 -c "import hashlib;print(hashlib.sha256(open('crossbit_ci.bin','rb').read()).hexdigest())"
+# against GOLDEN.sha256.
+crossbit_ci: ; $(FC) $(CI_FCFLAGS) $(MOD) test/crossbit.f90 -o crossbit_ci
+.PHONY: crossbit_ci

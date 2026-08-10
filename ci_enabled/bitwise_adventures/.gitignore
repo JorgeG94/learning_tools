@@ -11,3 +11,4 @@ crossbit_nv
 crossbit_*.bin
 crossbit_gf
 crossbit_fl
+crossbit_ci*

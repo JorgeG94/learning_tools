@@ -1,0 +1,79 @@
+# Bitwise-reproducibility gate for ci_enabled/bitwise_adventures.
+#
+# Every leg builds the crossbit dump program with a different compiler (and on
+# ARM as well as x86_64), runs it on deterministic inputs, and checks the
+# sha256 of the raw result bits against the committed golden hash.  The library
+# is built only from IEEE-required correctly-rounded operations with a strict
+# no-FMA-contraction / no-FTZ flag contract, so ANY conforming toolchain must
+# reproduce the golden bits exactly -- one differing bit fails the job.
+#
+# The GPU leg (nvfortran -stdpar, do concurrent) cannot run on hosted runners;
+# it is exercised on Gadi with `make gpubit`.
+name: bitwise-repro
+
+on:
+  push:
+    paths:
+      - 'ci_enabled/bitwise_adventures/**'
+      - '.github/workflows/bitwise_repro.yml'
+  pull_request:
+    paths:
+      - 'ci_enabled/bitwise_adventures/**'
+      - '.github/workflows/bitwise_repro.yml'
+  workflow_dispatch:
+
+jobs:
+  crossbit:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gcc-13 / x86_64
+            os: ubuntu-latest
+            toolchain: {compiler: gcc, version: '13'}
+            flags: -O2 -fdefault-real-8 -ffp-contract=off
+          - name: gcc-14 / x86_64
+            os: ubuntu-latest
+            toolchain: {compiler: gcc, version: '14'}
+            flags: -O2 -fdefault-real-8 -ffp-contract=off
+          - name: gcc / macOS arm64
+            os: macos-latest
+            toolchain: {compiler: gcc, version: '14'}
+            flags: -O2 -fdefault-real-8 -ffp-contract=off
+          - name: intel ifx / x86_64
+            os: ubuntu-latest
+            toolchain: {compiler: intel, version: '2025.0'}
+            flags: -O2 -r8 -fp-model=precise -no-fma -no-ftz
+          - name: nvidia nvfortran / x86_64
+            os: ubuntu-latest
+            toolchain: {compiler: nvidia-hpc, version: '25.5'}
+            flags: -O2 -r8 -Mnofma -Mnoflushz -Mnodaz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: fortran-lang/setup-fortran@v1
+        id: setup-fortran
+        with:
+          compiler: ${{ matrix.toolchain.compiler }}
+          version: ${{ matrix.toolchain.version }}
+
+      - name: Build crossbit
+        working-directory: ci_enabled/bitwise_adventures
+        env:
+          FC: ${{ steps.setup-fortran.outputs.fc }}
+        run: |
+          $FC ${{ matrix.flags }} src/bit_repro.f90 src/bit_repro_helpers.f90 \
+            test/crossbit.f90 -o crossbit_ci
+
+      - name: Run and verify against the golden bits
+        working-directory: ci_enabled/bitwise_adventures
+        run: |
+          ./crossbit_ci ci
+          got=$(python3 -c "import hashlib;print(hashlib.sha256(open('crossbit_ci.bin','rb').read()).hexdigest())")
+          want=$(cut -d' ' -f1 GOLDEN.sha256)
+          echo "golden: $want"
+          echo "got:    $got"
+          test "$got" = "$want" && echo "BITWISE: all values identical to golden" \
+            || { echo "::error::bitwise reproducibility broken"; exit 1; }

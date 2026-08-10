@@ -1,4 +1,12 @@
-# bit_repro_adventure
+# bitwise_adventures
+
+Lives in `learning_tools/ci_enabled/` and is tested by the `bitwise-repro`
+GitHub Actions workflow: every push builds the crossbit dump under gcc 13/14
+(x86_64), gcc (macOS arm64), Intel ifx, and nvidia nvfortran via
+fortran-lang/setup-fortran, and checks the sha256 of the raw result bits
+against `GOLDEN.sha256`.  One differing bit anywhere fails CI.  The GPU leg
+(`make gpubit`) runs on Gadi, not on hosted runners.
+
 
 Independent development of **bit-reproducible, GPU-offloadable transcendental
 functions** for MOM6, targeting the functions MEKE and EPBL need: `exp`, `log`,
