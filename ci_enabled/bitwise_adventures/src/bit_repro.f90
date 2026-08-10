@@ -121,39 +121,35 @@ elemental function exp_reprod(x) result(ex)
   endif
 end function exp_reprod
 
-!> Bit-reproducible natural log: exponent/fraction split, mantissa recentered to
-!! [sqrt(1/2), sqrt(2)), atanh series in s = (m-1)/(m+1).
+!> Bit-reproducible natural log, rebuilt on the double-double log2 core:
+!! ln(x) = (h+l)*ln2 with the leading product carried through two_prod.  This
+!! replaces the earlier single-double atanh evaluation, whose rounding shows
+!! at ~3 ulp (52% correctly rounded near x=1); the dd core is the same one the
+!! pow general path uses, which measures ~1 ulp there.  IEEE specials:
+!! log(0) = -Inf raising divideByZero, log(negative) = NaN raising invalid,
+!! log(+Inf) = +Inf, NaN passes through; denormals via norm_split.
 elemental function log_reprod(x) result(lx)
   !$omp declare target
-  real(wp), intent(in) :: x  !< The argument of the logarithm, x > 0
+  real(wp), intent(in) :: x  !< The argument of the logarithm
   real(wp) :: lx             !< The reproducible natural logarithm of x
 
-  real(wp), parameter :: ln2 = 0.69314718055994530942_wp     ! ln(2)
-  real(wp), parameter :: sqrt2_2 = 0.70710678118654752440_wp ! sqrt(1/2), the mantissa reduction threshold
-  ! Reciprocal odd integers 1/3 .. 1/21 for the atanh series (compile-folded -> identical host/device).
-  real(wp), parameter :: a3=1.0_wp/3.0_wp,   a5=1.0_wp/5.0_wp,   a7=1.0_wp/7.0_wp,   a9=1.0_wp/9.0_wp
-  real(wp), parameter :: a11=1.0_wp/11.0_wp, a13=1.0_wp/13.0_wp, a15=1.0_wp/15.0_wp, a17=1.0_wp/17.0_wp
-  real(wp), parameter :: a19=1.0_wp/19.0_wp, a21=1.0_wp/21.0_wp
-  real(wp) :: m  ! The mantissa of x, reduced to [sqrt(1/2), sqrt(2))
-  real(wp) :: s  ! (m-1)/(m+1), the atanh-series argument, |s| <= 0.172
-  real(wp) :: s2 ! s*s
-  real(wp) :: poly ! The polynomial estimate of log(m)
-  integer :: k ! The binary exponent of x
+  ! ln(2) as a double-double constant
+  real(wp), parameter :: ln2_hi = 0.6931471805599453_wp
+  real(wp), parameter :: ln2_lo = 2.3190468138462996e-17_wp
+  real(wp) :: h, l   ! log2(x) as a double-double pair
+  real(wp) :: ph, pe ! two_prod parts of h*ln2_hi
 
-  if (.not. (x > 0.0_wp)) then           ! zero, negative, or NaN
+  if (.not. (x > 0.0_wp)) then          ! zero, negative, or NaN
     if (x /= x) then ; lx = x                     ! NaN passes through
-    elseif (x == 0.0_wp) then ; lx = -1.0_wp / abs(x)   ! -Inf, raising divideByZero
+    elseif (x == 0.0_wp) then ; lx = -1.0_wp / abs(x)  ! -Inf, raising divideByZero
     else ; lx = (x - x) / (x - x)                 ! negative: NaN, raising invalid
     endif
   elseif (x > huge(x)) then
     lx = x                                        ! log(+Inf) = +Inf
   else
-  call norm_split(x, m, k)                             ! x = m * 2**k, m in [0.5, 1)
-  if (m < sqrt2_2) then ; m = m + m ; k = k - 1 ; endif ! recenter m to [sqrt(1/2), sqrt(2))
-  s = (m - 1.0_wp) / (m + 1.0_wp) ; s2 = s*s
-  poly = 2.0_wp*s*(1.0_wp + s2*(a3 + s2*(a5 + s2*(a7 + s2*(a9 + s2*(a11 + s2*(a13 + &
-         s2*(a15 + s2*(a17 + s2*(a19 + s2*a21))))))))))
-  lx = poly + real(k, wp)*ln2
+    call log2_dd(x, h, l)
+    call two_prod(h, ln2_hi, ph, pe)
+    lx = ph + (pe + (h*ln2_lo + l*ln2_hi))
   endif
 end function log_reprod
 

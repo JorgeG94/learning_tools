@@ -205,7 +205,7 @@ elemental module function exp2_pair(h, l) result(e2)
   real(wp) :: w    ! h*32
   real(wp) :: r    ! Fractional remainder of the exponent, |r| <= 1/64
   real(wp) :: q    ! 2**r - 1 from the polynomial, |q| <= 0.011
-  real(wp) :: corr ! Low-order correction: table low part and the l input
+  real(wp) :: v    ! The assembled product T * 2**r before the l correction
   integer :: n32, idx, n
 
   if (h > 1100.0_wp) then
@@ -219,12 +219,14 @@ elemental module function exp2_pair(h, l) result(e2)
     r = h - real(n32, wp) * 0.03125_wp      ! exact: n32/32 is an exact multiple of 2**-5
     idx = iand(n32, 31)              ! n32 = 32*n + idx with 0 <= idx < 32 for any
     n = (n32 - idx) / 32             ! sign; the division is exact (nvfortran has no shifta)
-    ! q = 2**r - 1, never materializing the 1: the assembly T + (T*q + corr)
-    ! keeps every small term at its own scale, so the only half-ulp rounding is
-    ! the final addition, and the l correction is scaled by the full product.
+    ! q = 2**r - 1, never materializing the 1, assembled as
+    !   v = T + (T*q + Tlo);  result = v + v*(l*ln2)
+    ! The l correction must scale the FULL product v = T*2**r: applying it to T
+    ! alone drops the q*l*ln2 cross term, which reaches ~2 ulp where |l| is
+    ! largest (|h| in [256,1024), measured as the 3-ulp exp tail).
     q = r*(e2c1 + r*(e2c2 + r*(e2c3 + r*(e2c4 + r*(e2c5 + r*e2c6)))))
-    corr = t2lo(idx) + t2hi(idx)*(l*e2c1)   ! 2**l ~ 1 + l*ln2, l ~ 2**-50
-    e2 = scale_reprod(t2hi(idx) + (t2hi(idx)*q + corr), n)
+    v = t2hi(idx) + (t2hi(idx)*q + t2lo(idx))
+    e2 = scale_reprod(v + v*(l*e2c1), n)
   endif
 end function exp2_pair
 
