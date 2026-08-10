@@ -1,0 +1,13 @@
+harness_ifx
+harness_ipo
+harness_nv
+harness_nvgpu
+gpu_bitwise
+*.mod
+*.smod
+gpu_perf
+crossbit_ifx
+crossbit_nv
+crossbit_*.bin
+crossbit_gf
+crossbit_fl
