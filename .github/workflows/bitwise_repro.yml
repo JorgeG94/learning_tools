@@ -76,11 +76,6 @@ jobs:
             toolchain: {compiler: aocc, version: '5.1.0'}
             flags: -O2 -ffp-contract=off
             experimental: true
-          - name: lfortran (experimental)
-            os: ubuntu-latest
-            toolchain: {compiler: lfortran, version: '0.45.0'}
-            flags: ''
-            experimental: true
     continue-on-error: ${{ matrix.experimental || false }}
     defaults:
       run:
