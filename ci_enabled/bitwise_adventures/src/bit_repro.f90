@@ -300,8 +300,16 @@ elemental function cuberoot(x) result(root)
   logical :: denorm ! True for denormal x
   real, parameter :: two_p54 = 18014398509481984.0  ! 2**54 = (2**18)**3, exact
 
-  if ((x >= 0.0) .eqv. (x <= 0.0)) then
-    ! Return 0 for an input of 0 (sign preserved), or NaN for a NaN input.
+  if (x /= x) then
+    ! NaN passes through.  x /= x is the one NaN predicate every backend gets
+    ! right: the former combined guard ((x>=0.0) .eqv. (x<=0.0)) relies on both
+    ! comparisons being false for NaN, but on gcc/arm64 the unordered compare
+    ! leaks through the LE condition code and the guard evaluates false, sending
+    ! NaN's bit pattern into the exponent arithmetic below (measured: a finite
+    ! ~6.7e102 on macOS arm64).
+    root = x
+  elseif (x == 0.0) then
+    ! +-0, sign preserved.
     root = x
   elseif (abs(x) > huge(x)) then
     ! The cube root of +-Inf is +-Inf.  Without this guard the exponent-field
