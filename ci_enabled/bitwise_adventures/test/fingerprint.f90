@@ -76,6 +76,30 @@ call pr('pow_meke ', pow_reprod(3.0_real64, 0.25_real64))
 call pr('pow_big  ', pow_reprod(1.5_real64, 800.0_real64))
 call pr('cbrt     ', cuberoot(7.0_real64))
 
+! --- cuberoot over the full specials list (the macOS arm64 divergence is
+! --- isolated to set6-cbrt; these name the exact special and its value) ------
+block
+  use, intrinsic :: ieee_arithmetic, only : ieee_value, ieee_positive_inf, &
+                                            ieee_negative_inf, ieee_quiet_nan
+  real(real64) :: sv(12)
+  character(len=9), parameter :: nm(12) = [ character(len=9) :: &
+    'cb_p0', 'cb_m0', 'cb_pinf', 'cb_minf', 'cb_nan', 'cb_tiny', &
+    'cb_dn1074', 'cb_dn1050', 'cb_huge', 'cb_one', 'cb_mone', 'cb_two' ]
+  integer :: k
+  sv(1) = 0.0_real64 ; sv(2) = -0.0_real64
+  sv(3) = ieee_value(1.0_real64, ieee_positive_inf)
+  sv(4) = ieee_value(1.0_real64, ieee_negative_inf)
+  sv(5) = ieee_value(1.0_real64, ieee_quiet_nan)
+  sv(6) = tiny(1.0_real64)
+  sv(7) = tiny(1.0_real64) ; sv(7) = sv(7) * 2.0_real64**(-52)   ! 2**-1074
+  sv(8) = 1.5_real64 ; sv(8) = sv(8) * tiny(1.0_real64) * 2.0_real64**(-28)
+  sv(9) = huge(1.0_real64) ; sv(10) = 1.0_real64
+  sv(11) = -1.0_real64 ; sv(12) = 2.0_real64
+  do k = 1, 12
+    call pr(nm(k), cuberoot(sv(k)))
+  enddo
+end block
+
 contains
 
 subroutine pr(name, v)
