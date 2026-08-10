@@ -1,5 +1,13 @@
 # bitwise_adventures
 
+**Status: one golden bit pattern (sha256 `93b62044…`, 4.8M values) reproduced
+bit-for-bit by gcc 13/14, Intel ifx, Intel classic ifort, nvfortran, LLVM
+flang, and AOCC flang-classic, on Linux + macOS + Windows, x86_64 + arm64,
+and on a V100 GPU via `do concurrent` — including vectorized builds,
+denormals, and the full IEEE specials matrix.**  Every leg enforces the
+no-FMA-contraction / no-FTZ flag contract; the CI gate is
+`sha256(raw bits) == GOLDEN.sha256`.
+
 Lives in `learning_tools/ci_enabled/` and is tested by the `bitwise-repro`
 GitHub Actions workflow: every push builds the crossbit dump under gcc 13/14
 (x86_64), gcc (macOS arm64), Intel ifx, and nvidia nvfortran via
