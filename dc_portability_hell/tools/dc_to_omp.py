@@ -126,6 +126,7 @@ class Header:
     indices: list[tuple[str, str, str, str | None]]  # (var, lo, hi, step)
     privates: list[str]
     has_mask: bool
+    mask: str | None = None  #: lowered to `if (mask) then` inside the loop nest
 
 
 def parse_triplet(item: str) -> tuple[str, str, str, str | None] | None:
@@ -142,8 +143,160 @@ def parse_triplet(item: str) -> tuple[str, str, str, str | None] | None:
     return (name, lo, hi, step)
 
 
+COMPOUND_END_DO_RE = re.compile(r"^\s*end\s*do\b", re.IGNORECASE)
+
+
+def _split_positions(s: str) -> list[int]:
+    """Indices of top-level `;` in `s` (paren depth 0)."""
+    pos, depth = [], 0
+    for k, ch in enumerate(s):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == ";" and depth == 0:
+            pos.append(k)
+    return pos
+
+
+def normalize_compound_lines(lines: list[str]) -> tuple[list[str], list[int]]:
+    """Split `;`-compound lines that the block machinery needs to own outright.
+
+    Fortran allows several statements per line. MOM6 uses that everywhere:
+
+        if (use_temperature) then ; do concurrent (j=js:je, i=is:ie)
+        do k=1,nz ; do concurrent (i=is:ie)
+        do concurrent (i=is:ie) ; press(i,j) = 0.0 ; enddo
+        endif ; enddo
+
+    The emitter replaces WHOLE LINES — a directive plus one `do` per index in
+    place of the header, and the closers in place of the `end do`. Any
+    statement sharing one of those lines would be destroyed by the rewrite. So
+    rather than refuse such loops (MOM6 has ~180), give each statement its own
+    line first and let the line-oriented machinery downstream be exactly right.
+
+    Only two kinds of line are touched, so the diff stays proportional to the
+    loops actually converted instead of reflowing whole files:
+      * a line whose code holds a `do concurrent` plus anything else, and
+      * a multi-statement line containing an `end do` / `enddo`.
+
+    Never touched: comment and directive lines, preprocessor lines, and any
+    line involved in a `&` continuation — statement boundaries there are not
+    what a `;` split would suggest.
+
+    Returns the new lines plus an `origin` map (new index -> original 0-based
+    line number) so diagnostics can still name the line the reader has.
+    """
+    out: list[str] = []
+    origin: list[int] = []
+    in_continuation = False
+    for n, raw in enumerate(lines):
+        stripped = raw.lstrip()
+        code = code_part(raw)
+        bare = strip_strings(code)
+        was_cont, continues = in_continuation, bare.rstrip().endswith("&")
+        in_continuation = continues
+
+        # A line that ENDS in `&` is still safe to split: every `;`-separated
+        # piece before the last is a complete statement, and the `&` stays
+        # attached to the final piece. Only a line that IS a continuation of a
+        # previous one is off limits — there a `;` may sit inside a continued
+        # expression, where it is not a statement boundary.
+        # `do K=2,nz ; do concurrent(I=is-1:ie) &` is exactly this shape, and
+        # skipping it silently deleted the `do K=2,nz` when the header line was
+        # replaced.
+        cuts = [] if was_cont else _split_positions(bare)
+        if (not cuts or not stripped or stripped[0] in "!#"):
+            out.append(raw); origin.append(n); continue
+
+        # Slice the ORIGINAL text at those positions (string literals intact).
+        bounds = [-1] + cuts + [len(code)]
+        pieces = [code[a + 1:b].strip() for a, b in zip(bounds, bounds[1:])]
+        pieces = [x for x in pieces if x]
+        if len(pieces) < 2:
+            out.append(raw); origin.append(n); continue
+
+        has_dc = any(DC_RE.search(strip_strings(x)) for x in pieces)
+        has_end_do = any(END_DO_RE.match(x) for x in pieces)
+        if not (has_dc or has_end_do):
+            out.append(raw); origin.append(n); continue
+
+        bang = strip_strings(raw).find("!")
+        comment = raw[bang:].rstrip() if bang >= 0 else ""
+        indent = raw[: len(raw) - len(stripped)]
+        for k, piece in enumerate(pieces):
+            tail = f"  {comment}" if (comment and k == len(pieces) - 1) else ""
+            out.append(f"{indent}{piece}{tail}")
+            origin.append(n)
+    return out, origin
+
+
+# A hand-written OpenMP COMPUTE region: `!$omp target teams ...` (loop,
+# distribute parallel do, ...). Data-mapping directives (`target data`,
+# `target enter/exit data`, `target update`) are NOT compute regions — a
+# compute construct nested inside those is perfectly legal.
+HANDWRITTEN_TARGET_RE = re.compile(r"^!\$omp\s+target\s+teams\b", re.IGNORECASE)
+
+
+def handwritten_target_extent(lines: list[str]) -> set[int]:
+    """Indices covered by an existing `!$omp target teams` region's loop nest.
+
+    A `do concurrent` inside one of these must NOT be given a directive of its
+    own: OpenMP forbids a target region inside a target region, and the loop is
+    already covered by the enclosing construct. MOM6's GPU branch has ~50 such
+    loops — a `!$omp target teams loop` over `j`, with `do concurrent (i=...)`
+    inside — so this is the common case, not a corner.
+
+    The construct's `end` directive is OPTIONAL for a loop-associated one, so
+    the extent is found by walking the associated loop nest to its close rather
+    than by looking for `!$omp end`.
+    """
+    covered: set[int] = set()
+    n = 0
+    while n < len(lines):
+        s = code_part(lines[n]).strip()
+        if not HANDWRITTEN_TARGET_RE.match(lines[n].strip()):
+            n += 1
+            continue
+        m = n
+        while m < len(lines) and lines[m].rstrip().endswith("&"):
+            m += 1
+        depth, k, started = 0, m + 1, False
+        while k < len(lines):
+            for st in statements(code_part(lines[k])):
+                if not st:
+                    continue
+                if END_DO_RE.match(st):
+                    depth -= 1
+                elif DO_RE.match(st):
+                    depth += 1
+                    started = True
+            covered.add(k)
+            if started and depth <= 0:
+                break
+            k += 1
+        n = m + 1
+    return covered
+
+
+def _src_line(idx: int, line_delta: int, origin: list[int] | None) -> int:
+    """Map a buffer index back to a 1-based ORIGINAL source line number.
+
+    Two shifts stand between the two: `line_delta` lines added by conversions
+    already applied to this buffer, and the compound-line normalisation that
+    ran before any of them (recorded in `origin`). A skip message is the only
+    handle on what needs a manual patch, so one naming a line the loop is not
+    on is worse than none.
+    """
+    j = idx - line_delta
+    if origin is not None and 0 <= j < len(origin):
+        return origin[j] + 1
+    return j + 1
+
+
 def find_dc_block(lines: list[str], start: int, line_delta: int = 0,
-                  label: str = "") -> tuple[Header, int, int] | None:
+                  label: str = "",
+                  origin: list[int] | None = None) -> tuple[Header, int, int] | None:
     """Locate the next CONVERTIBLE `do concurrent` block at or after `start`.
 
     Returns (header, header_first_line, header_last_line), or None when the
@@ -196,7 +349,7 @@ def find_dc_block(lines: list[str], start: int, line_delta: int = 0,
         rest = joined[m2.end():].lstrip()
         if not rest.startswith("("):
             sys.stderr.write(
-                f"  {label}skip: unparseable do-concurrent header at line {first - line_delta + 1}\n")
+                f"  {label}skip: unparseable do-concurrent header at line {_src_line(first, line_delta, origin)}\n")
             i = last + 1
             continue
         depth, end = 0, -1
@@ -210,20 +363,21 @@ def find_dc_block(lines: list[str], start: int, line_delta: int = 0,
                     break
         if end < 0:
             sys.stderr.write(
-                f"  {label}skip: unbalanced parens in header at line {first - line_delta + 1}\n")
+                f"  {label}skip: unbalanced parens in header at line {_src_line(first, line_delta, origin)}\n")
             i = last + 1
             continue
         inside = rest[1:end]
         trailing = rest[end + 1:].strip()
 
         indices: list[tuple[str, str, str, str | None]] = []
-        has_mask = False
+        masks: list[str] = []
         for it in split_top_level(inside, ","):
             t = parse_triplet(it)
             if t is not None:
                 indices.append(t)
             elif it.strip():
-                has_mask = True
+                masks.append(it.strip())
+        has_mask = bool(masks)
 
         privates: list[str] = []
         t = trailing
@@ -256,31 +410,40 @@ def find_dc_block(lines: list[str], start: int, line_delta: int = 0,
             else:
                 t = after
 
+        # Code BEFORE the construct on the header line would be destroyed by
+        # the replacement just as trailing code would. The normaliser splits
+        # such lines, so reaching here means it declined to (a continuation it
+        # could not safely cut) — refuse rather than delete the statement.
+        prefix = code_part(lines[first])[:
+            DC_RE.search(strip_strings(code_part(lines[first]))).start()]
+        if prefix.strip():
+            sys.stderr.write(
+                f"  {label}skip: header at line {_src_line(first, line_delta, origin)} "
+                f"carries leading code ({prefix.strip()!r}); manual handling needed\n")
+            i = last + 1
+            continue
+
         # Anything left in `t` is real code the header carries after its
         # clauses — MOM6's `do concurrent (j=js:je, I=is-1:ie) ; if (...) then`.
         # The emitter replaces the whole header line, so converting would
         # DELETE that statement. Refuse.
         if t.strip():
             sys.stderr.write(
-                f"  {label}skip: header at line {first - line_delta + 1} carries "
+                f"  {label}skip: header at line {_src_line(first, line_delta, origin)} carries "
                 f"trailing statements ({t.strip()!r}); manual handling needed\n")
             i = last + 1
             continue
 
-        if has_mask:
-            sys.stderr.write(
-                f"  {label}skip: header has mask at line {first - line_delta + 1}; manual handling needed\n"
-            )
-            i = last + 1
-            continue
         if not indices:
             sys.stderr.write(
-                f"  {label}skip: no parseable index triplet at line {first - line_delta + 1}\n")
+                f"  {label}skip: no parseable index triplet at line {_src_line(first, line_delta, origin)}\n")
             i = last + 1
             continue
 
         indent = lines[first][: len(lines[first]) - len(lines[first].lstrip())]
-        return (Header(indent=indent, indices=indices, privates=privates, has_mask=False),
+        return (Header(indent=indent, indices=indices, privates=privates,
+                       has_mask=has_mask,
+                       mask=" .and. ".join(f"({m})" for m in masks) if masks else None),
                 first, last)
     return None
 
@@ -342,52 +505,118 @@ DIRECTIVE_KW = {
 }
 
 
-def emit_replacement(h: Header, target: str = "gpu") -> tuple[list[str], list[str]]:
-    """Return (header_lines, footer_lines)."""
+def emit_replacement(h: Header, target: str = "gpu", nested: bool = False,
+                     extra_privates: list[str] | None = None
+                     ) -> tuple[list[str], list[str]]:
+    """Return (header_lines, footer_lines).
+
+    `nested` emits the loop nest with NO directive. A `do concurrent` sitting
+    inside another one is already covered by the outer construct's
+    parallelism, and OpenMP forbids a `target` region inside a `target`
+    region, so the inner loop becomes a plain sequential nest. Its `local(...)`
+    variables are hoisted into the OUTER directive's `private(...)` by the
+    caller — the outer iterations are the parallel unit, so per-thread copies
+    there give the inner loop exactly the privacy `local` asked for.
+    """
     n = len(h.indices)
     kw = DIRECTIVE_KW[target]
+    privates = list(h.privates) + list(extra_privates or [])
+    seen: set[str] = set()
+    privates = [x for x in privates
+                if not (x.lower() in seen or seen.add(x.lower()))]
     parts = [f"!$omp {kw}"]
     if n > 1:
         parts.append(f"collapse({n})")
-    if h.privates:
-        parts.append(f"private({', '.join(h.privates)})")
+    if privates:
+        parts.append(f"private({', '.join(privates)})")
     directive = h.indent + " ".join(parts)
     do_lines = []
     for (var, lo, hi, step) in h.indices:
         rng = f"{lo}, {hi}" + (f", {step}" if step else "")
         do_lines.append(f"{h.indent}do {var} = {rng}")
     end_lines = [f"{h.indent}end do" for _ in h.indices]
-    end_lines.append(f"{h.indent}!$omp end {kw}")
-    return ([directive] + do_lines, end_lines)
+    if not nested:
+        end_lines.append(f"{h.indent}!$omp end {kw}")
+    if h.mask:
+        # `do concurrent (i=lo:hi, MASK)` runs the body only where MASK holds.
+        # OpenMP has no mask clause, so it becomes a guard inside the nest.
+        #
+        # Equivalent for any LEGAL do concurrent: the standard requires each
+        # iteration to be independent, so the body cannot write what the mask
+        # reads. (Were it to, the mask is conceptually evaluated for all indices
+        # before the first iteration, and a guard evaluated per-iteration would
+        # differ — but such a loop is already invalid as `do concurrent`.)
+        do_lines.append(f"{h.indent}if ({h.mask}) then")
+        end_lines.insert(0, f"{h.indent}end if")
+    return ((do_lines if nested else [directive] + do_lines), end_lines)
 
 
 def transform_lines(lines: list[str], target: str = "gpu",
-                    label: str = "") -> tuple[list[str], int]:
-    """Transform all `do concurrent` blocks. Returns (new_lines, n_changed)."""
-    out = list(lines)
+                    label: str = "", nested: bool = False
+                    ) -> tuple[list[str], int] | tuple[list[str], int, list[str]]:
+    """Transform every `do concurrent` block. Returns (new_lines, n_changed).
+
+    Nested loops are handled by recursing into each block's body BEFORE
+    emitting its directive: an inner `do concurrent` becomes a plain `do` nest
+    (no directive — OpenMP forbids a target region inside a target region) and
+    surrenders its `local(...)` variables to the outer directive's
+    `private(...)`. With `nested=True` the call itself emits no directives and
+    returns those hoisted names as a third element.
+    """
+    # Give every header and every `end do` a line of its own before scanning:
+    # the emitter rewrites whole lines, so a statement sharing one would be lost.
+    if any(DC_RE.search(strip_strings(code_part(l))) for l in lines):
+        out, origin = normalize_compound_lines(lines)
+    else:
+        out, origin = list(lines), list(range(len(lines)))
+    # Loops already inside a hand-written `!$omp target teams` region must not
+    # get a directive of their own. Computed once, on the normalised buffer,
+    # before any rewriting shifts the indices.
+    covered = handwritten_target_extent(out) if not nested else set()
+    hoisted: list[str] = []
     changed = 0
     i = 0
     # Lines added to `out` so far. Reported line numbers subtract it so every
     # warning points at the original source, not the partially rewritten buffer.
     delta = 0
     while i < len(out):
-        block = find_dc_block(out, i, delta, label)
+        block = find_dc_block(out, i, delta, label, origin)
         if block is None:
             break
         h, first, last = block
         end_idx = find_matching_end_do(out, last)
         if end_idx is None:
             sys.stderr.write(f"  {label}warn: no matching end do for header "
-                             f"at line {first - delta + 1}\n")
+                             f"at line {_src_line(first, delta, origin)}\n")
             i = last + 1
             continue
-        new_header, new_footer = emit_replacement(h, target)
-        out = (out[:first] + new_header + out[last + 1:end_idx] + new_footer + out[end_idx + 1:])
-        changed += 1
-        n_body = end_idx - last - 1
-        new_len = len(new_header) + n_body + len(new_footer)
+        # Convert the body first: nested loops lose their directives and give
+        # up their locality names, which this header must then declare.
+        body, body_changed, body_privates = transform_lines(
+            out[last + 1:end_idx], target, label, nested=True)
+        in_handwritten = (first - delta) in covered
+        if in_handwritten and (h.privates or body_privates):
+            # Nothing to hoist them into — editing MOM6's own directive is not
+            # this tool's business. Say so instead of dropping them silently.
+            names = ", ".join(h.privates + body_privates)
+            sys.stderr.write(
+                f"  {label}warn: loop at line {_src_line(first, delta, origin)} is inside a "
+                f"hand-written !$omp target region and has locality ({names}); "
+                f"add these to that directive's private() by hand\n")
+        new_header, new_footer = emit_replacement(
+            h, target, nested=nested or in_handwritten,
+            extra_privates=body_privates)
+        if nested:
+            # No directive here either; pass every private further out.
+            hoisted.extend(h.privates)
+            hoisted.extend(body_privates)
+        out = (out[:first] + new_header + body + new_footer + out[end_idx + 1:])
+        changed += 1 + body_changed
+        new_len = len(new_header) + len(body) + len(new_footer)
         delta += new_len - (end_idx - first + 1)
         i = first + new_len
+    if nested:
+        return (out, changed, hoisted)
     return (out, changed)
 
 

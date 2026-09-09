@@ -141,7 +141,7 @@ IF_PRESENT_RE = re.compile(r"\s+if_present\b", re.IGNORECASE)
 # `default(present)` is an OpenACC-only clause: it asserts every referenced
 # array is already device-resident.  OpenMP has no equivalent (it is NOT
 # `defaultmap(present)`, which means something else), and both ifx and
-# amdflang reject it (a real build failure on ifx and amdflang).
+# amdflang reject it — the Frontier/Intel OpenMP build failure.
 # PRESENT_RE above cannot catch it: that matches `present` followed by `(`,
 # whereas here `present` is the ARGUMENT.  Needs its own strip.
 DEFAULT_PRESENT_RE = re.compile(r"\s+default\s*\(\s*present\s*\)", re.IGNORECASE)

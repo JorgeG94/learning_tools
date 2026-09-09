@@ -31,8 +31,9 @@ region, not an offload region that happens to land on the host.
 | `tools/acc_reduce_to_dc.py` | The *inward* migration: `!$acc parallel loop reduction(op:v)` → F2023 `do concurrent (...) reduce(op:v)`. Run this on your **canonical** tree to shrink the surface that needs translating at all. |
 | `tools/omp_to_doconcurrent.py` | The reverse translator (`!$omp target teams distribute parallel do` → `do concurrent`), for importing an OpenMP-first tree into the DC convention. |
 | `tools/regen_dc_openmp.sh` | The pipeline: audit → `acc_to_omp` → `dc_to_omp` → overlay patches → project post-hook. |
+| `tools/omp_optional_map.py` | Post-pass: adds explicit `map()` clauses for `optional` explicit-shape array dummies read inside a generated target region. Works around a real LLVM Flang offload bug — see below. |
 | `tools/_locality_macro.py` | Unwraps CPP-hidden locality specifiers (`DO_LOCALITY(local(a,b))`) before clause parsing. See below. |
-| `tools/test_acc_to_omp.py`, `tools/test_locality_macro.py`, `tools/test_dc_to_omp.py` | pytest regression guards for clause handling, macro unwrapping, and block-finder structure. |
+| `tools/test_acc_to_omp.py`, `tools/test_locality_macro.py`, `tools/test_dc_to_omp.py`, `tools/test_omp_optional_map.py` | pytest regression guards for clause handling, macro unwrapping, block-finder structure, and the optional-map post-pass. |
 | `tools/_parallel.py`, `tools/_progress.py` | Multi-process fan-out (order-preserving) and a TTY progress bar. |
 
 Python 3.9+, **standard library only**.
@@ -164,6 +165,68 @@ lines are corrected for the drift each preceding rewrite introduces (a
 converted one-line header becomes 2+N lines). A skip message is the only
 handle on what needs a manual patch, so one naming a line the loop is not on
 is worse than none.
+
+## Absent `optional` dummies: the `map()` post-pass
+
+LLVM Flang (and ROCm amdflang) emits an **unconditional implicit map** for an
+`optional`, **explicit-shape** array dummy referenced inside a `!$omp target`
+region. The size comes from the declared bounds — computable whether or not the
+argument is present — but an absent argument's base address is NULL, so
+libomptarget calls `hsa_amd_memory_lock(0x0, size)` and the run dies:
+
+```
+PluginInterface error: Failure to copy data from host to device.
+Pointers: host = 0x0, device = 0x7ff366000000, size = 1438240
+HSA_STATUS_ERROR_INVALID_ARGUMENT
+```
+
+`host = 0x0` together with a **non-zero, plausible size** is the fingerprint.
+To identify the array, rebuild with `-gline-tables-only`, run with
+`LIBOMPTARGET_INFO=1`, and grep the post-mortem mapping table for a Host Ptr of
+`0x0000000000000000`.
+
+Flang gets this right for **descriptor-passed** dummies — assumed-shape
+`(:,:)`, `allocatable`, `pointer` — because it null-checks the box before
+building the map bounds. An explicit-shape dummy has no box to check, so only
+that form is affected. A host-side `if (present(x))` guard does **not** help:
+the map happens at region entry regardless of the branch taken.
+
+**The fix** is to name the argument in an explicit `map()` clause, which takes
+flang's presence-guarded path; the OpenMP rule that a map of an absent optional
+dummy is ignored then applies. Map type follows intent — `to` for
+`intent(in)`, `tofrom` otherwise. For an array already device-resident the
+clause is just a present-table lookup and moves no data.
+
+`omp_optional_map.py` is a **post-pass over the translated tree**, not a change
+to either translator, because both emit target regions and the fix should not
+live in two places. `regen_dc_openmp.sh` runs it as step 4, gpu target only
+(the cpu variant emits no `map()` clauses at all).
+
+OpenACC never hits this — it resolves the reference through the host present
+table — so the canonical source needs no change. This is purely a defect of the
+OpenMP-offload translation, which is why it belongs here rather than in the
+physics source.
+
+**If you write your own scanner, scope it per procedure.** A file-global grep
+over-counts badly: it attributes an optional to sibling procedures that declare
+a same-named NON-optional dummy, and it matches `!$omp declare target`, which is
+a device-routine declaration rather than a region. One hand-scan claimed 81
+sites where the real number was 28.
+
+**Known limits** (worth knowing before pointing it at a new codebase):
+* `region_end` matches the outermost `do` after the directive, so a target
+  region whose body is not a loop is not scanned. Fine for translator output,
+  not for arbitrary hand-written OpenMP.
+* Procedure detection is the same heuristic `dc_to_omp.py` uses, and inherits
+  whatever that gets wrong on interface blocks and `module procedure`.
+* It re-parses procedures once per directive, because appending a clause can
+  insert a continuation line and shift every later index. O(directives x lines)
+  — irrelevant at ~500 files, possibly not at ~5000.
+
+Two verification habits that this pass makes cheap, and that caught real
+problems: **run it twice and assert the second run adds zero** (idempotence
+doubles as a coverage check), and **diff a written copy of the tree** rather
+than trusting the tool's own count.
 
 ## CI
 
