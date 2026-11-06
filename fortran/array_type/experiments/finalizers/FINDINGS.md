@@ -55,3 +55,21 @@ Notes:
 
 No measurable cost: SWE 4096^2 x 2000 steps on V100 is 6.56 s with
 finalizers vs 6.73 s without (noise).
+
+## Update: elemental finalizer misdispatch on nvfortran 26.5
+
+An API review found that scalar-only `final` and `assignment(=)` leave
+*arrays* of wrappers unprotected (`ys = xs` copied silently; a local
+`type(dp_1d_t) :: xs(3)` was never finalized). Making both
+`impure elemental` fixes that on gfortran and ifx, but on nvfortran 26.5
+the runtime's `process_final_procedures` then calls the elemental
+**assignment** procedure in place of the final procedure when a local goes
+out of scope (gdb backtrace: `dp_2d_t_assign <- process_final_procedures
+<- a()`). A minimal type does not reproduce it; the full devarray type
+(many bindings, a generic) does.
+
+What devarray does now: `assignment(=)` is `impure elemental` (blocks
+array copies everywhere), while the finalizers are a scalar one plus
+explicit rank-1 and rank-2 ones (arrays of rank 3+ of wrappers are not
+finalized, and the leak report covers them). Assignment of an empty
+wrapper to an empty wrapper is allowed, since nothing is shared.

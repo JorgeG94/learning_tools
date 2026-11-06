@@ -3,8 +3,8 @@ module swe_model
    !! Written in the roundabout "pool" style: every component owns its
    !! arrays, allocates them in `init`, maps them to the device once, and
    !! frees them in `destroy`. The difference is that the arrays are
-   !! `dp2_t`, so nobody has to hand-maintain a `bytes()` sum: each
-   !! component just registers a tag and the ledger does the accounting.
+   !! `dp_2d_t`, so nobody hand-maintains a `bytes()` sum: each component
+   !! owns a tag and the ledger does the accounting.
    !!
    !! Grid (C-grid, one halo cell, all arrays dimensioned (0:nx+1, 0:ny+1)):
    !!   h(i,j)  cell centre         total fluid depth
@@ -15,13 +15,13 @@ module swe_model
    !! new h, then v with the new h and new u (which also makes the explicit
    !! Coriolis term neutrally stable).
    use, intrinsic :: iso_fortran_env, only: dp => real64
-   use mem_ledger, only: mem_register_tag
-   use devarray, only: dp2_t
+   use mem_ledger, only: mem_tag_t, mem_tag
+   use devarray, only: dp_2d_t
    implicit none
    private
 
    public :: swe_params_t, swe_state_t, swe_work_t
-   public :: swe_step, swe_total_mass, swe_total_energy
+   public :: swe_check_bounds, swe_step, swe_total_mass, swe_total_energy
 
    type :: swe_params_t
       integer :: nx = 512, ny = 512
@@ -38,7 +38,8 @@ module swe_model
 
    type :: swe_state_t
       !! Prognostic variables.
-      type(dp2_t) :: h, u, v
+      type(mem_tag_t) :: tag          !! owner tag of every array below
+      type(dp_2d_t) :: h, u, v
    contains
       procedure :: init => state_init
       procedure :: destroy => state_destroy
@@ -46,7 +47,8 @@ module swe_model
 
    type :: swe_work_t
       !! Scratch workspace: never needs to visit the host.
-      type(dp2_t) :: fu, fv   !! mass fluxes h*u at u points and h*v at v points
+      type(mem_tag_t) :: tag
+      type(dp_2d_t) :: fu, fv   !! mass fluxes h*u at u points and h*v at v points
    contains
       procedure :: init => work_init
       procedure :: destroy => work_destroy
@@ -66,22 +68,18 @@ contains
    subroutine state_init(this, p)
       class(swe_state_t), intent(inout) :: this
       type(swe_params_t), intent(in) :: p
-      integer :: tag
-      integer :: lb(2), ub(2)
 
-      tag = mem_register_tag("swe_state")
-      lb = [0, 0]
-      ub = [p%nx + 1, p%ny + 1]
-      call this%h%create("swe_state%h", ub, tag=tag, lb=lb)
-      call this%u%create("swe_state%u", ub, tag=tag, lb=lb)
-      call this%v%create("swe_state%v", ub, tag=tag, lb=lb)
+      this%tag = mem_tag("swe_state")
+      call this%h%create("swe_state%h", this%tag, ub=[p%nx + 1, p%ny + 1], lb=[0, 0])
+      call this%u%create_like("swe_state%u", this%tag, this%h)
+      call this%v%create_like("swe_state%v", this%tag, this%h)
 
-      ! Allocate on the device without uploading anything, then build the
-      ! initial condition there: under -stdpar=gpu a host-side do concurrent
-      ! would be offloaded anyway.
-      call this%h%to_device(copyin=.false.)
-      call this%u%to_device(copyin=.false.)
-      call this%v%to_device(copyin=.false.)
+      ! Map without uploading, then build the initial condition on the
+      ! device: under -stdpar=gpu a host-side do concurrent would be
+      ! offloaded anyway.
+      call this%h%alloc_device()
+      call this%u%alloc_device()
+      call this%v%alloc_device()
       call initial_condition(this%h%data, this%u%data, this%v%data, p%nx, p%ny, &
                              p%dx, p%dy, p%H0, p%bump)
    end subroutine state_init
@@ -93,15 +91,15 @@ contains
       call this%v%destroy()
    end subroutine state_destroy
 
-   subroutine work_init(this, p)
+   subroutine work_init(this, state)
+      !! Workspaces take their bounds from the state they work on.
       class(swe_work_t), intent(inout) :: this
-      type(swe_params_t), intent(in) :: p
-      integer :: tag
-      tag = mem_register_tag("swe_workspace")
-      call this%fu%create("swe_work%fu", [p%nx + 1, p%ny + 1], tag=tag, lb=[0, 0])
-      call this%fv%create("swe_work%fv", [p%nx + 1, p%ny + 1], tag=tag, lb=[0, 0])
-      call this%fu%to_device(copyin=.false.)
-      call this%fv%to_device(copyin=.false.)
+      type(swe_state_t), intent(in) :: state
+      this%tag = mem_tag("swe_workspace")
+      call this%fu%create_like("swe_work%fu", this%tag, state%h)
+      call this%fv%create_like("swe_work%fv", this%tag, state%h)
+      call this%fu%alloc_device()
+      call this%fv%alloc_device()
    end subroutine work_init
 
    subroutine work_destroy(this)
@@ -109,6 +107,22 @@ contains
       call this%fu%destroy()
       call this%fv%destroy()
    end subroutine work_destroy
+
+   subroutine swe_check_bounds(s, w, p)
+      !! Every kernel below declares its arrays as (0:nx+1, 0:ny+1). An
+      !! explicit-shape dummy silently reinterprets anything else, so check
+      !! once at init that the arrays really have those bounds.
+      type(swe_state_t), intent(in) :: s
+      type(swe_work_t), intent(in) :: w
+      type(swe_params_t), intent(in) :: p
+      integer :: ub(2)
+      ub = [p%nx + 1, p%ny + 1]
+      call s%h%assert_bounds(ub, lb=[0, 0])
+      call s%u%assert_bounds(ub, lb=[0, 0])
+      call s%v%assert_bounds(ub, lb=[0, 0])
+      call w%fu%assert_bounds(ub, lb=[0, 0])
+      call w%fv%assert_bounds(ub, lb=[0, 0])
+   end subroutine swe_check_bounds
 
    subroutine initial_condition(h, u, v, nx, ny, dx, dy, H0, bump)
       !! Gaussian bump at rest, halos included.
@@ -132,7 +146,7 @@ contains
    ! ---------------------------------------------------------- time step
    ! The wrappers stop here: kernels receive plain explicit-shape arrays and
    ! are plain `do concurrent`. With -stdpar=gpu -acc -gpu=mem:separate they
-   ! run on the device and use the copies mapped by devarray%to_device.
+   ! run on the device and use the copies mapped by devarray (to_device / alloc_device).
 
    subroutine swe_step(s, w, p)
       type(swe_state_t), intent(inout) :: s

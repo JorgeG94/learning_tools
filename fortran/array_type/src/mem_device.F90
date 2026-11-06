@@ -1,17 +1,19 @@
-!! Device memory queries from the OpenACC runtime, for cross-checking the ledger.
+!! Device memory queries from the OpenACC runtime.
 module mem_device
    !! The ledger counts what *we* asked for. These report what the runtime
-   !! says is free, which also includes the CUDA context, pool rounding
-   !! and every other process on the device. Use the difference across a
-   !! mapping phase as the ground truth to compare the ledger against.
-   !! Without OpenACC every query returns -1.
+   !! says is free, which also includes the CUDA context, pool rounding and
+   !! every other process on the device: use the difference across a mapping
+   !! phase as the ground truth to compare the ledger against.
+   !! Without OpenACC the queries return -1 and the budget check passes.
    use, intrinsic :: iso_fortran_env, only: int64
 #ifdef _OPENACC
    use openacc
 #endif
+   use mem_ledger_core, only: mem_fatal, mem_human_bytes
    implicit none
    private
    public :: device_init, device_free_bytes, device_total_bytes, device_enabled
+   public :: mem_require_device
 
 contains
 
@@ -50,5 +52,20 @@ contains
       b = -1
 #endif
    end function device_total_bytes
+
+   subroutine mem_require_device(nbytes, what)
+      !! Fatal, with a readable message, if `nbytes` more cannot fit on the
+      !! device. Called by every devarray mapping; also useful once at init
+      !! with a whole-model estimate, before anything is mapped.
+      integer(int64), intent(in) :: nbytes
+      character(len=*), intent(in) :: what
+      integer(int64) :: free
+      free = device_free_bytes()
+      if (free < 0) return
+      if (nbytes > free) &
+         call mem_fatal("not enough device memory for "//what//": need "// &
+                        mem_human_bytes(nbytes)//", "//mem_human_bytes(free)// &
+                        " free (call mem_report to see who holds the rest)")
+   end subroutine mem_require_device
 
 end module mem_device
