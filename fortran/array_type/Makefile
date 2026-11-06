@@ -1,6 +1,6 @@
-# make                     nvfortran + OpenACC (source mom6_env.sh first)
+# make                     nvfortran, -stdpar=gpu + OpenACC data (source mom6_env.sh first)
 # make ACC=0               nvfortran, CPU only
-# make COMPILER=gnu        gfortran, CPU only
+# make COMPILER=gnu        gfortran >= 15 (DO CONCURRENT REDUCE is F2023), CPU only
 # make COMPILER=intel      ifx, CPU only
 # make NO_FINAL=1          build devarray without finalizers
 # make run / make test / make generate / make check-generated
@@ -14,7 +14,9 @@ ifeq ($(COMPILER),nv)
   FFLAGS := -O2 -Mpreprocess -Minform=warn
   MODFLAG := -module
   ifeq ($(ACC),1)
-    FFLAGS += -acc -gpu=$(GPU_CC) -Minfo=accel
+    # do concurrent -> device kernels; data lifecycle stays with the OpenACC
+    # directives inside devarray (mem:separate, as in roundabout/terco).
+    FFLAGS += -stdpar=gpu -acc -gpu=$(GPU_CC),mem:separate -Minfo=accel,stdpar
   endif
 else ifeq ($(COMPILER),intel)
   FC := ifx
@@ -23,7 +25,7 @@ else ifeq ($(COMPILER),intel)
   ACC := 0
 else
   FC := gfortran
-  FFLAGS := -O2 -cpp -std=f2018 -Wall -Wextra -Wno-compare-reals -fcheck=all
+  FFLAGS := -O2 -cpp -std=f2023 -Wall -Wextra -Wno-compare-reals -fcheck=all
   MODFLAG := -J
   ACC := 0
 endif

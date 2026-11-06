@@ -66,31 +66,24 @@ contains
    subroutine state_init(this, p)
       class(swe_state_t), intent(inout) :: this
       type(swe_params_t), intent(in) :: p
-      integer :: tag, i, j
+      integer :: tag
       integer :: lb(2), ub(2)
-      real(dp) :: x, y, xc, yc, sig
 
       tag = mem_register_tag("swe_state")
       lb = [0, 0]
       ub = [p%nx + 1, p%ny + 1]
       call this%h%create("swe_state%h", ub, tag=tag, lb=lb)
-      call this%u%create("swe_state%u", ub, tag=tag, lb=lb, fill=0.0_dp)
-      call this%v%create("swe_state%v", ub, tag=tag, lb=lb, fill=0.0_dp)
+      call this%u%create("swe_state%u", ub, tag=tag, lb=lb)
+      call this%v%create("swe_state%v", ub, tag=tag, lb=lb)
 
-      xc = 0.5_dp*p%nx*p%dx
-      yc = 0.5_dp*p%ny*p%dy
-      sig = 0.1_dp*min(p%nx*p%dx, p%ny*p%dy)
-      do j = 0, p%ny + 1
-         y = (j - 0.5_dp)*p%dy
-         do i = 0, p%nx + 1
-            x = (i - 0.5_dp)*p%dx
-            this%h%data(i, j) = p%H0 + p%bump*exp(-((x - xc)**2 + (y - yc)**2)/(2.0_dp*sig**2))
-         end do
-      end do
-
-      call this%h%to_device()
-      call this%u%to_device()
-      call this%v%to_device()
+      ! Allocate on the device without uploading anything, then build the
+      ! initial condition there: under -stdpar=gpu a host-side do concurrent
+      ! would be offloaded anyway.
+      call this%h%to_device(copyin=.false.)
+      call this%u%to_device(copyin=.false.)
+      call this%v%to_device(copyin=.false.)
+      call initial_condition(this%h%data, this%u%data, this%v%data, p%nx, p%ny, &
+                             p%dx, p%dy, p%H0, p%bump)
    end subroutine state_init
 
    subroutine state_destroy(this)
@@ -117,8 +110,29 @@ contains
       call this%fv%destroy()
    end subroutine work_destroy
 
+   subroutine initial_condition(h, u, v, nx, ny, dx, dy, H0, bump)
+      !! Gaussian bump at rest, halos included.
+      integer, intent(in) :: nx, ny
+      real(dp), intent(out) :: h(0:nx + 1, 0:ny + 1), u(0:nx + 1, 0:ny + 1), v(0:nx + 1, 0:ny + 1)
+      real(dp), intent(in) :: dx, dy, H0, bump
+      integer :: i, j
+      real(dp) :: xc, yc, sig2, x, y
+      xc = 0.5_dp*nx*dx
+      yc = 0.5_dp*ny*dy
+      sig2 = 2.0_dp*(0.1_dp*min(nx*dx, ny*dy))**2
+      do concurrent(j=0:ny + 1, i=0:nx + 1) local(x, y)
+         x = (i - 0.5_dp)*dx
+         y = (j - 0.5_dp)*dy
+         h(i, j) = H0 + bump*exp(-((x - xc)**2 + (y - yc)**2)/sig2)
+         u(i, j) = 0.0_dp
+         v(i, j) = 0.0_dp
+      end do
+   end subroutine initial_condition
+
    ! ---------------------------------------------------------- time step
-   ! The wrappers stop here: kernels receive plain explicit-shape arrays.
+   ! The wrappers stop here: kernels receive plain explicit-shape arrays and
+   ! are plain `do concurrent`. With -stdpar=gpu -acc -gpu=mem:separate they
+   ! run on the device and use the copies mapped by devarray%to_device.
 
    subroutine swe_step(s, w, p)
       type(swe_state_t), intent(inout) :: s
@@ -142,13 +156,11 @@ contains
       integer, intent(in) :: nx, ny
       real(dp), intent(inout) :: a(0:nx + 1, 0:ny + 1)
       integer :: i, j
-      !$acc parallel loop default(present)
-      do j = 1, ny
+      do concurrent(j=1:ny)
          a(0, j) = a(nx, j)
          a(nx + 1, j) = a(1, j)
       end do
-      !$acc parallel loop default(present)
-      do i = 0, nx + 1
+      do concurrent(i=0:nx + 1)
          a(i, 0) = a(i, ny)
          a(i, ny + 1) = a(i, 1)
       end do
@@ -159,12 +171,9 @@ contains
       real(dp), intent(in) :: h(0:nx + 1, 0:ny + 1), u(0:nx + 1, 0:ny + 1), v(0:nx + 1, 0:ny + 1)
       real(dp), intent(inout) :: fu(0:nx + 1, 0:ny + 1), fv(0:nx + 1, 0:ny + 1)
       integer :: i, j
-      !$acc parallel loop collapse(2) default(present)
-      do j = 0, ny
-         do i = 0, nx
-            fu(i, j) = 0.5_dp*(h(i, j) + h(i + 1, j))*u(i, j)
-            fv(i, j) = 0.5_dp*(h(i, j) + h(i, j + 1))*v(i, j)
-         end do
+      do concurrent(j=0:ny, i=0:nx)
+         fu(i, j) = 0.5_dp*(h(i, j) + h(i + 1, j))*u(i, j)
+         fv(i, j) = 0.5_dp*(h(i, j) + h(i, j + 1))*v(i, j)
       end do
    end subroutine mass_flux
 
@@ -174,11 +183,8 @@ contains
       real(dp), intent(in) :: fu(0:nx + 1, 0:ny + 1), fv(0:nx + 1, 0:ny + 1)
       real(dp), intent(in) :: dt, dx, dy
       integer :: i, j
-      !$acc parallel loop collapse(2) default(present)
-      do j = 1, ny
-         do i = 1, nx
-            h(i, j) = h(i, j) - dt*((fu(i, j) - fu(i - 1, j))/dx + (fv(i, j) - fv(i, j - 1))/dy)
-         end do
+      do concurrent(j=1:ny, i=1:nx)
+         h(i, j) = h(i, j) - dt*((fu(i, j) - fu(i - 1, j))/dx + (fv(i, j) - fv(i, j - 1))/dy)
       end do
    end subroutine continuity
 
@@ -189,12 +195,9 @@ contains
       real(dp), intent(in) :: dt, dx, g, f
       integer :: i, j
       real(dp) :: vbar
-      !$acc parallel loop collapse(2) default(present) private(vbar)
-      do j = 1, ny
-         do i = 1, nx
-            vbar = 0.25_dp*(v(i, j) + v(i + 1, j) + v(i, j - 1) + v(i + 1, j - 1))
-            u(i, j) = u(i, j) + dt*(f*vbar - g*(h(i + 1, j) - h(i, j))/dx)
-         end do
+      do concurrent(j=1:ny, i=1:nx) local(vbar)
+         vbar = 0.25_dp*(v(i, j) + v(i + 1, j) + v(i, j - 1) + v(i + 1, j - 1))
+         u(i, j) = u(i, j) + dt*(f*vbar - g*(h(i + 1, j) - h(i, j))/dx)
       end do
    end subroutine u_momentum
 
@@ -205,12 +208,9 @@ contains
       real(dp), intent(in) :: dt, dy, g, f
       integer :: i, j
       real(dp) :: ubar
-      !$acc parallel loop collapse(2) default(present) private(ubar)
-      do j = 1, ny
-         do i = 1, nx
-            ubar = 0.25_dp*(u(i, j) + u(i - 1, j) + u(i, j + 1) + u(i - 1, j + 1))
-            v(i, j) = v(i, j) + dt*(-f*ubar - g*(h(i, j + 1) - h(i, j))/dy)
-         end do
+      do concurrent(j=1:ny, i=1:nx) local(ubar)
+         ubar = 0.25_dp*(u(i, j) + u(i - 1, j) + u(i, j + 1) + u(i - 1, j + 1))
+         v(i, j) = v(i, j) + dt*(-f*ubar - g*(h(i, j + 1) - h(i, j))/dy)
       end do
    end subroutine v_momentum
 
@@ -227,11 +227,8 @@ contains
       real(dp), intent(in) :: h(0:nx + 1, 0:ny + 1)
       integer :: i, j
       m = 0.0_dp
-      !$acc parallel loop collapse(2) default(present) reduction(+:m)
-      do j = 1, ny
-         do i = 1, nx
-            m = m + h(i, j)
-         end do
+      do concurrent(j=1:ny, i=1:nx) reduce(+:m)
+         m = m + h(i, j)
       end do
    end function mass_kernel
 
@@ -248,12 +245,9 @@ contains
       real(dp), intent(in) :: g, H0
       integer :: i, j
       e = 0.0_dp
-      !$acc parallel loop collapse(2) default(present) reduction(+:e)
-      do j = 1, ny
-         do i = 1, nx
-            e = e + 0.5_dp*h(i, j)*0.5_dp*(u(i, j)**2 + u(i - 1, j)**2 + v(i, j)**2 + v(i, j - 1)**2) &
-                + 0.5_dp*g*(h(i, j) - H0)**2
-         end do
+      do concurrent(j=1:ny, i=1:nx) reduce(+:e)
+         e = e + 0.5_dp*h(i, j)*0.5_dp*(u(i, j)**2 + u(i - 1, j)**2 + v(i, j)**2 + v(i, j - 1)**2) &
+             + 0.5_dp*g*(h(i, j) - H0)**2
       end do
    end function energy_kernel
 
