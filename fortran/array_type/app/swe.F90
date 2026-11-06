@@ -5,7 +5,7 @@
 program swe
    use, intrinsic :: iso_fortran_env, only: dp => real64, int64, output_unit
    use mem_ledger, only: mem_report, mem_check_leaks, mem_device_bytes, mem_human_bytes
-   use mem_device, only: device_init, device_free_bytes, device_enabled
+   use mem_device, only: device_init, device_free_bytes, device_enabled, device_backend
    use mem_collective, only: mem_checksum_t, mem_checksum, mem_report_values
    use swe_model, only: swe_params_t, swe_state_t, swe_work_t, swe_check_bounds, swe_step, &
                         swe_total_mass, swe_total_energy
@@ -41,7 +41,7 @@ program swe
 
    write (output_unit, '(a, i0, a, i0, a, i0, a, es10.3, a)') 'swe: ', p%nx, ' x ', p%ny, &
       ', ', nsteps, ' steps, dt = ', p%dt, ' s'
-   write (output_unit, '(a, l1)') 'OpenACC: ', device_enabled()
+   write (output_unit, '(a, a)') 'device backend: ', device_backend()
 
    call device_init()
    free_before = device_free_bytes()
@@ -72,7 +72,6 @@ program swe
    do n = 1, nsteps
       call swe_step(state, work, p)
    end do
-   !$acc wait
    call system_clock(t1)
    secs = real(t1 - t0, dp)/real(rate, dp)
 

@@ -95,9 +95,17 @@ contains
          ! by host address range.
          call c_f_pointer(obj%addr, bytes, [obj%host])
          if (to_host) then
+#if defined(DEVARRAY_ACC)
             !$acc update self(bytes)
+#elif defined(DEVARRAY_OMP)
+            !$omp target update from(bytes)
+#endif
          else
+#if defined(DEVARRAY_ACC)
             !$acc update device(bytes)
+#elif defined(DEVARRAY_OMP)
+            !$omp target update to(bytes)
+#endif
          end if
       end do
    end subroutine update_all
@@ -120,7 +128,11 @@ contains
          if (obj%kind_code /= MEM_KIND_R64 .or. obj%nelem == 0) cycle
          call c_f_pointer(obj%addr, a, [obj%nelem])
          dev = obj%mapped
+#if defined(DEVARRAY_ACC)
          !$acc parallel loop present(a) if(dev)
+#elif defined(DEVARRAY_OMP)
+         !$omp target teams distribute parallel do if(target: dev)
+#endif
          do i = 1, obj%nelem
             a(i) = value
          end do
@@ -144,7 +156,11 @@ contains
          if (obj%kind_code /= MEM_KIND_I32 .or. obj%nelem == 0) cycle
          call c_f_pointer(obj%addr, a, [obj%nelem])
          dev = obj%mapped
+#if defined(DEVARRAY_ACC)
          !$acc parallel loop present(a) if(dev)
+#elif defined(DEVARRAY_OMP)
+         !$omp target teams distribute parallel do if(target: dev)
+#endif
          do i = 1, obj%nelem
             a(i) = value
          end do

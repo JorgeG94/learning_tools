@@ -51,7 +51,7 @@ program test_collective
    cs = mem_checksum(ts, sync=.false.)
    call check(cs%sum == -54.0_dp, "sync=.false. reads the host copies as they are")
    cs = mem_checksum(ts)
-#ifdef _OPENACC
+#ifdef DEVARRAY_DEVICE
    call check(cs%sum == 78.0_dp .and. all(a%data == 1.0_dp), "default sync pulls the device copies first")
    call check(all(c%data == -1.0_dp), "sync only touches the requested tag")
 #else
@@ -65,14 +65,14 @@ program test_collective
    a%data = 0.0_dp
    b%data = 0.0_dp
    call mem_update_host(ts)
-#ifdef _OPENACC
+#ifdef DEVARRAY_DEVICE
    call check(all(a%data == 7.0_dp) .and. all(b%data == 7.0_dp), "update_device/update_host round trip")
 #endif
 
    ! ---- fill where the data lives
    call mem_fill(0.5_dp, ts)
    call mem_fill(11_int32, ts)
-#ifdef _OPENACC
+#ifdef DEVARRAY_DEVICE
    call check(all(a%data == 7.0_dp), "mem_fill on mapped arrays leaves the host copy alone")
    call mem_update_host(ts)
 #endif
@@ -88,7 +88,7 @@ program test_collective
    a%data = 0.0_dp
    b%data = 0.0_dp
    call mem_update_host(ts)
-#ifdef _OPENACC
+#ifdef DEVARRAY_DEVICE
    call check(all(a%data == 1.0_dp) .and. all(b%data == 1.0_dp), "for_each sync_back pushes changes to the device")
 #else
    call check(all(a%data == 0.0_dp), "without OpenACC update_host leaves the host copy alone")

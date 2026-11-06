@@ -1,35 +1,44 @@
-# make                     nvfortran, -stdpar=gpu + OpenACC data (source mom6_env.sh first)
-# make ACC=0               nvfortran, CPU only
+# make                     nvfortran, BACKEND=acc: -stdpar=gpu + OpenACC data
+# make BACKEND=omp         nvfortran, -stdpar=gpu + OpenMP target data
+# make BACKEND=none        nvfortran, CPU only
 # make COMPILER=gnu        gfortran >= 15 (DO CONCURRENT REDUCE is F2023), CPU only
 # make COMPILER=intel      ifx, CPU only
 # make NO_FINAL=1          build devarray without finalizers
 # make run / make test / make generate / make check-generated
+# (source mom6_env.sh first for nvfortran)
 
 COMPILER ?= nv
-ACC ?= 1
 GPU_CC ?= cc70
 
 ifeq ($(COMPILER),nv)
+  BACKEND ?= acc
   FC := nvfortran
   FFLAGS := -O2 -Mpreprocess -Minform=warn
   MODFLAG := -module
-  ifeq ($(ACC),1)
-    # do concurrent -> device kernels; data lifecycle stays with the OpenACC
-    # directives inside devarray (mem:separate, as in roundabout/terco).
-    FFLAGS += -stdpar=gpu -acc -gpu=$(GPU_CC),mem:separate -Minfo=accel,stdpar
+  # do concurrent -> device kernels (-stdpar=gpu); the data lifecycle stays
+  # with the directives inside devarray (mem:separate, as in roundabout/terco).
+  ifeq ($(BACKEND),acc)
+    FFLAGS += -stdpar=gpu -acc -gpu=$(GPU_CC),mem:separate -Minfo=accel,stdpar \
+              -DDEVARRAY_ACC -DDEVARRAY_DEVICE
+  else ifeq ($(BACKEND),omp)
+    # OpenMP has no free-memory query: on NVIDIA use cudaMemGetInfo (-cuda links cudart)
+    FFLAGS += -stdpar=gpu -mp=gpu -gpu=$(GPU_CC),mem:separate -cuda -Minfo=mp,stdpar \
+              -DDEVARRAY_OMP -DDEVARRAY_DEVICE -DDEVARRAY_CUDA_MEMINFO
+  else ifneq ($(BACKEND),none)
+    $(error BACKEND must be acc, omp or none)
   endif
 else ifeq ($(COMPILER),intel)
+  BACKEND := none
   FC := ifx
   # 5423: locality specs are ignored in a serial build, which is fine here
   FFLAGS := -O2 -fpp -stand f23 -warn all -check bounds -diag-disable=5423
   MODFLAG := -module
-  ACC := 0
 else
+  BACKEND := none
   FC := gfortran
   # -Wno-external-argument-mismatch: gfortran 15.1 bug, see mem_collective.F90
   FFLAGS := -O2 -cpp -std=f2023 -Wall -Wextra -Wno-compare-reals -Wno-external-argument-mismatch -fcheck=all
   MODFLAG := -J
-  ACC := 0
 endif
 
 ifeq ($(NO_FINAL),1)
@@ -37,7 +46,7 @@ ifeq ($(NO_FINAL),1)
   FINAL_TAG := -nofinal
 endif
 
-BUILD := build/$(COMPILER)-acc$(ACC)$(FINAL_TAG)
+BUILD := build/$(COMPILER)-$(BACKEND)$(FINAL_TAG)
 LIB_SRC := src/mem_ledger_core.F90 src/mem_ledger.F90 src/mem_ledger_backend.F90 \
            src/mem_device.F90 src/devarray.F90 src/mem_collective.F90
 LIB_OBJ := $(patsubst src/%.F90,$(BUILD)/%.o,$(LIB_SRC))

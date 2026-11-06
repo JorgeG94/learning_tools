@@ -29,8 +29,10 @@ module devarray
    !!   error: a copy would share the ledger entry and the device mapping.
    !! * A tracked object must stay where it was created (the ledger keeps its
    !!   address): don't move it with intrinsic assignment of a parent type.
-   !! * Without OpenACC, the device methods act on the host copy and device
-   !!   bytes stay zero, so the same code builds and runs on a CPU.
+   !! * Device backend chosen at build time: -DDEVARRAY_ACC (OpenACC) or
+   !!   -DDEVARRAY_OMP (OpenMP target), each with -DDEVARRAY_DEVICE. With
+   !!   neither, the device methods act on the host copy and device bytes
+   !!   stay zero, so the same code builds and runs on a CPU.
    use, intrinsic :: iso_fortran_env, only: real64, int32, int64
    use, intrinsic :: iso_c_binding, only: c_ptr, c_loc, c_null_ptr, c_associated, c_f_pointer
    use mem_ledger, only: mem_tag_t
@@ -321,8 +323,12 @@ contains
       class(dp_1d_t), intent(inout), target :: this
       call this%check_intact("to_device")
       call dp_1d_t_check_mappable(this, "to_device")
+#if defined(DEVARRAY_ACC)
       !$acc enter data copyin(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+      !$omp target enter data map(to: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
       call mem_track_device(this%id, this%bytes())
 #endif
       this%state = ST_HOST_DEVICE
@@ -334,8 +340,12 @@ contains
       class(dp_1d_t), intent(inout), target :: this
       call this%check_intact("alloc_device")
       call dp_1d_t_check_mappable(this, "alloc_device")
+#if defined(DEVARRAY_ACC)
       !$acc enter data create(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+      !$omp target enter data map(alloc: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
       call mem_track_device(this%id, this%bytes())
 #endif
       this%state = ST_HOST_DEVICE
@@ -356,7 +366,11 @@ contains
       call this%check_intact("update_device")
       if (this%state /= ST_HOST_DEVICE) call mem_fatal("update_device: '"//mem_object_name(this%id)// &
                                                         "' is not on the device")
+#if defined(DEVARRAY_ACC)
       !$acc update device(this%data)
+#elif defined(DEVARRAY_OMP)
+      !$omp target update to(this%data)
+#endif
    end subroutine dp_1d_t_update_device
 
    subroutine dp_1d_t_update_host(this)
@@ -364,7 +378,11 @@ contains
       call this%check_intact("update_host")
       if (this%state /= ST_HOST_DEVICE) call mem_fatal("update_host: '"//mem_object_name(this%id)// &
                                                       "' is not on the device")
+#if defined(DEVARRAY_ACC)
       !$acc update self(this%data)
+#elif defined(DEVARRAY_OMP)
+      !$omp target update from(this%data)
+#endif
    end subroutine dp_1d_t_update_host
 
    subroutine dp_1d_t_fill(this, value)
@@ -406,8 +424,12 @@ contains
                         " Was this object copied with intrinsic assignment?")
       call this%check_intact("destroy")
       if (this%state == ST_HOST_DEVICE) then
+#if defined(DEVARRAY_ACC)
          !$acc exit data delete(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+         !$omp target exit data map(delete: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
          call mem_untrack_device(this%id)
 #endif
       end if
@@ -590,8 +612,12 @@ contains
       class(dp_2d_t), intent(inout), target :: this
       call this%check_intact("to_device")
       call dp_2d_t_check_mappable(this, "to_device")
+#if defined(DEVARRAY_ACC)
       !$acc enter data copyin(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+      !$omp target enter data map(to: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
       call mem_track_device(this%id, this%bytes())
 #endif
       this%state = ST_HOST_DEVICE
@@ -603,8 +629,12 @@ contains
       class(dp_2d_t), intent(inout), target :: this
       call this%check_intact("alloc_device")
       call dp_2d_t_check_mappable(this, "alloc_device")
+#if defined(DEVARRAY_ACC)
       !$acc enter data create(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+      !$omp target enter data map(alloc: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
       call mem_track_device(this%id, this%bytes())
 #endif
       this%state = ST_HOST_DEVICE
@@ -625,7 +655,11 @@ contains
       call this%check_intact("update_device")
       if (this%state /= ST_HOST_DEVICE) call mem_fatal("update_device: '"//mem_object_name(this%id)// &
                                                         "' is not on the device")
+#if defined(DEVARRAY_ACC)
       !$acc update device(this%data)
+#elif defined(DEVARRAY_OMP)
+      !$omp target update to(this%data)
+#endif
    end subroutine dp_2d_t_update_device
 
    subroutine dp_2d_t_update_host(this)
@@ -633,7 +667,11 @@ contains
       call this%check_intact("update_host")
       if (this%state /= ST_HOST_DEVICE) call mem_fatal("update_host: '"//mem_object_name(this%id)// &
                                                       "' is not on the device")
+#if defined(DEVARRAY_ACC)
       !$acc update self(this%data)
+#elif defined(DEVARRAY_OMP)
+      !$omp target update from(this%data)
+#endif
    end subroutine dp_2d_t_update_host
 
    subroutine dp_2d_t_fill(this, value)
@@ -675,8 +713,12 @@ contains
                         " Was this object copied with intrinsic assignment?")
       call this%check_intact("destroy")
       if (this%state == ST_HOST_DEVICE) then
+#if defined(DEVARRAY_ACC)
          !$acc exit data delete(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+         !$omp target exit data map(delete: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
          call mem_untrack_device(this%id)
 #endif
       end if
@@ -859,8 +901,12 @@ contains
       class(dp_3d_t), intent(inout), target :: this
       call this%check_intact("to_device")
       call dp_3d_t_check_mappable(this, "to_device")
+#if defined(DEVARRAY_ACC)
       !$acc enter data copyin(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+      !$omp target enter data map(to: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
       call mem_track_device(this%id, this%bytes())
 #endif
       this%state = ST_HOST_DEVICE
@@ -872,8 +918,12 @@ contains
       class(dp_3d_t), intent(inout), target :: this
       call this%check_intact("alloc_device")
       call dp_3d_t_check_mappable(this, "alloc_device")
+#if defined(DEVARRAY_ACC)
       !$acc enter data create(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+      !$omp target enter data map(alloc: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
       call mem_track_device(this%id, this%bytes())
 #endif
       this%state = ST_HOST_DEVICE
@@ -894,7 +944,11 @@ contains
       call this%check_intact("update_device")
       if (this%state /= ST_HOST_DEVICE) call mem_fatal("update_device: '"//mem_object_name(this%id)// &
                                                         "' is not on the device")
+#if defined(DEVARRAY_ACC)
       !$acc update device(this%data)
+#elif defined(DEVARRAY_OMP)
+      !$omp target update to(this%data)
+#endif
    end subroutine dp_3d_t_update_device
 
    subroutine dp_3d_t_update_host(this)
@@ -902,7 +956,11 @@ contains
       call this%check_intact("update_host")
       if (this%state /= ST_HOST_DEVICE) call mem_fatal("update_host: '"//mem_object_name(this%id)// &
                                                       "' is not on the device")
+#if defined(DEVARRAY_ACC)
       !$acc update self(this%data)
+#elif defined(DEVARRAY_OMP)
+      !$omp target update from(this%data)
+#endif
    end subroutine dp_3d_t_update_host
 
    subroutine dp_3d_t_fill(this, value)
@@ -944,8 +1002,12 @@ contains
                         " Was this object copied with intrinsic assignment?")
       call this%check_intact("destroy")
       if (this%state == ST_HOST_DEVICE) then
+#if defined(DEVARRAY_ACC)
          !$acc exit data delete(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+         !$omp target exit data map(delete: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
          call mem_untrack_device(this%id)
 #endif
       end if
@@ -1057,10 +1119,14 @@ contains
       real(dp), intent(in) :: v
       logical, intent(in) :: on_dev
       integer(int64) :: i
-#ifndef _OPENACC
-      if (on_dev) continue    ! without OpenACC there is only the host copy
+#ifndef DEVARRAY_DEVICE
+      if (on_dev) continue    ! without a device backend there is only the host copy
 #endif
+#if defined(DEVARRAY_ACC)
       !$acc parallel loop present(a) if(on_dev)
+#elif defined(DEVARRAY_OMP)
+      !$omp target teams distribute parallel do if(target: on_dev)
+#endif
       do i = 1, n
          a(i) = v
       end do
@@ -1143,8 +1209,12 @@ contains
       class(i32_1d_t), intent(inout), target :: this
       call this%check_intact("to_device")
       call i32_1d_t_check_mappable(this, "to_device")
+#if defined(DEVARRAY_ACC)
       !$acc enter data copyin(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+      !$omp target enter data map(to: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
       call mem_track_device(this%id, this%bytes())
 #endif
       this%state = ST_HOST_DEVICE
@@ -1156,8 +1226,12 @@ contains
       class(i32_1d_t), intent(inout), target :: this
       call this%check_intact("alloc_device")
       call i32_1d_t_check_mappable(this, "alloc_device")
+#if defined(DEVARRAY_ACC)
       !$acc enter data create(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+      !$omp target enter data map(alloc: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
       call mem_track_device(this%id, this%bytes())
 #endif
       this%state = ST_HOST_DEVICE
@@ -1178,7 +1252,11 @@ contains
       call this%check_intact("update_device")
       if (this%state /= ST_HOST_DEVICE) call mem_fatal("update_device: '"//mem_object_name(this%id)// &
                                                         "' is not on the device")
+#if defined(DEVARRAY_ACC)
       !$acc update device(this%data)
+#elif defined(DEVARRAY_OMP)
+      !$omp target update to(this%data)
+#endif
    end subroutine i32_1d_t_update_device
 
    subroutine i32_1d_t_update_host(this)
@@ -1186,7 +1264,11 @@ contains
       call this%check_intact("update_host")
       if (this%state /= ST_HOST_DEVICE) call mem_fatal("update_host: '"//mem_object_name(this%id)// &
                                                       "' is not on the device")
+#if defined(DEVARRAY_ACC)
       !$acc update self(this%data)
+#elif defined(DEVARRAY_OMP)
+      !$omp target update from(this%data)
+#endif
    end subroutine i32_1d_t_update_host
 
    subroutine i32_1d_t_fill(this, value)
@@ -1228,8 +1310,12 @@ contains
                         " Was this object copied with intrinsic assignment?")
       call this%check_intact("destroy")
       if (this%state == ST_HOST_DEVICE) then
+#if defined(DEVARRAY_ACC)
          !$acc exit data delete(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+         !$omp target exit data map(delete: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
          call mem_untrack_device(this%id)
 #endif
       end if
@@ -1412,8 +1498,12 @@ contains
       class(i32_2d_t), intent(inout), target :: this
       call this%check_intact("to_device")
       call i32_2d_t_check_mappable(this, "to_device")
+#if defined(DEVARRAY_ACC)
       !$acc enter data copyin(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+      !$omp target enter data map(to: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
       call mem_track_device(this%id, this%bytes())
 #endif
       this%state = ST_HOST_DEVICE
@@ -1425,8 +1515,12 @@ contains
       class(i32_2d_t), intent(inout), target :: this
       call this%check_intact("alloc_device")
       call i32_2d_t_check_mappable(this, "alloc_device")
+#if defined(DEVARRAY_ACC)
       !$acc enter data create(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+      !$omp target enter data map(alloc: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
       call mem_track_device(this%id, this%bytes())
 #endif
       this%state = ST_HOST_DEVICE
@@ -1447,7 +1541,11 @@ contains
       call this%check_intact("update_device")
       if (this%state /= ST_HOST_DEVICE) call mem_fatal("update_device: '"//mem_object_name(this%id)// &
                                                         "' is not on the device")
+#if defined(DEVARRAY_ACC)
       !$acc update device(this%data)
+#elif defined(DEVARRAY_OMP)
+      !$omp target update to(this%data)
+#endif
    end subroutine i32_2d_t_update_device
 
    subroutine i32_2d_t_update_host(this)
@@ -1455,7 +1553,11 @@ contains
       call this%check_intact("update_host")
       if (this%state /= ST_HOST_DEVICE) call mem_fatal("update_host: '"//mem_object_name(this%id)// &
                                                       "' is not on the device")
+#if defined(DEVARRAY_ACC)
       !$acc update self(this%data)
+#elif defined(DEVARRAY_OMP)
+      !$omp target update from(this%data)
+#endif
    end subroutine i32_2d_t_update_host
 
    subroutine i32_2d_t_fill(this, value)
@@ -1497,8 +1599,12 @@ contains
                         " Was this object copied with intrinsic assignment?")
       call this%check_intact("destroy")
       if (this%state == ST_HOST_DEVICE) then
+#if defined(DEVARRAY_ACC)
          !$acc exit data delete(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+         !$omp target exit data map(delete: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
          call mem_untrack_device(this%id)
 #endif
       end if
@@ -1681,8 +1787,12 @@ contains
       class(i32_3d_t), intent(inout), target :: this
       call this%check_intact("to_device")
       call i32_3d_t_check_mappable(this, "to_device")
+#if defined(DEVARRAY_ACC)
       !$acc enter data copyin(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+      !$omp target enter data map(to: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
       call mem_track_device(this%id, this%bytes())
 #endif
       this%state = ST_HOST_DEVICE
@@ -1694,8 +1804,12 @@ contains
       class(i32_3d_t), intent(inout), target :: this
       call this%check_intact("alloc_device")
       call i32_3d_t_check_mappable(this, "alloc_device")
+#if defined(DEVARRAY_ACC)
       !$acc enter data create(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+      !$omp target enter data map(alloc: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
       call mem_track_device(this%id, this%bytes())
 #endif
       this%state = ST_HOST_DEVICE
@@ -1716,7 +1830,11 @@ contains
       call this%check_intact("update_device")
       if (this%state /= ST_HOST_DEVICE) call mem_fatal("update_device: '"//mem_object_name(this%id)// &
                                                         "' is not on the device")
+#if defined(DEVARRAY_ACC)
       !$acc update device(this%data)
+#elif defined(DEVARRAY_OMP)
+      !$omp target update to(this%data)
+#endif
    end subroutine i32_3d_t_update_device
 
    subroutine i32_3d_t_update_host(this)
@@ -1724,7 +1842,11 @@ contains
       call this%check_intact("update_host")
       if (this%state /= ST_HOST_DEVICE) call mem_fatal("update_host: '"//mem_object_name(this%id)// &
                                                       "' is not on the device")
+#if defined(DEVARRAY_ACC)
       !$acc update self(this%data)
+#elif defined(DEVARRAY_OMP)
+      !$omp target update from(this%data)
+#endif
    end subroutine i32_3d_t_update_host
 
    subroutine i32_3d_t_fill(this, value)
@@ -1766,8 +1888,12 @@ contains
                         " Was this object copied with intrinsic assignment?")
       call this%check_intact("destroy")
       if (this%state == ST_HOST_DEVICE) then
+#if defined(DEVARRAY_ACC)
          !$acc exit data delete(this%data)
-#ifdef _OPENACC
+#elif defined(DEVARRAY_OMP)
+         !$omp target exit data map(delete: this%data)
+#endif
+#ifdef DEVARRAY_DEVICE
          call mem_untrack_device(this%id)
 #endif
       end if
@@ -1879,10 +2005,14 @@ contains
       integer(int32), intent(in) :: v
       logical, intent(in) :: on_dev
       integer(int64) :: i
-#ifndef _OPENACC
-      if (on_dev) continue    ! without OpenACC there is only the host copy
+#ifndef DEVARRAY_DEVICE
+      if (on_dev) continue    ! without a device backend there is only the host copy
 #endif
+#if defined(DEVARRAY_ACC)
       !$acc parallel loop present(a) if(on_dev)
+#elif defined(DEVARRAY_OMP)
+      !$omp target teams distribute parallel do if(target: on_dev)
+#endif
       do i = 1, n
          a(i) = v
       end do

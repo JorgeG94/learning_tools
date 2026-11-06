@@ -67,7 +67,7 @@ program test_ledger
    call a2%to_device()
    call a2%update_host()
    call check(a2%is_on_device(), "to_device sets the on-device state")
-#ifdef _OPENACC
+#ifdef DEVARRAY_DEVICE
    call check(mem_device_bytes(ta) == bb2, "device bytes tracked under OpenACC")
 #else
    call check(mem_device_bytes() == 0, "device bytes stay zero without OpenACC")
@@ -79,7 +79,7 @@ program test_ledger
    a1%data = -1.0_dp
    call a1%alloc_device()
    call a1%update_host()
-#ifdef _OPENACC
+#ifdef DEVARRAY_DEVICE
    call check(all(a1%data == 4.0_dp), "alloc_device puts the create fill on the device")
    call a1%fill(9.0_dp)
    call check(all(a1%data == 4.0_dp), "fill on a mapped array leaves the host copy alone")
