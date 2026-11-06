@@ -40,6 +40,11 @@ module devarray
       procedure :: is_created => dp1_is_created
       procedure :: is_on_device => dp1_is_on_device
       procedure :: ledger_id => dp1_ledger_id
+      procedure, private :: dp1_assign
+      generic :: assignment(=) => dp1_assign
+#ifndef DEVARRAY_NO_FINAL
+      final :: dp1_final
+#endif
    end type dp1_t
 
    type, public :: dp2_t
@@ -57,6 +62,11 @@ module devarray
       procedure :: is_created => dp2_is_created
       procedure :: is_on_device => dp2_is_on_device
       procedure :: ledger_id => dp2_ledger_id
+      procedure, private :: dp2_assign
+      generic :: assignment(=) => dp2_assign
+#ifndef DEVARRAY_NO_FINAL
+      final :: dp2_final
+#endif
    end type dp2_t
 
    type, public :: dp3_t
@@ -74,6 +84,11 @@ module devarray
       procedure :: is_created => dp3_is_created
       procedure :: is_on_device => dp3_is_on_device
       procedure :: ledger_id => dp3_ledger_id
+      procedure, private :: dp3_assign
+      generic :: assignment(=) => dp3_assign
+#ifndef DEVARRAY_NO_FINAL
+      final :: dp3_final
+#endif
    end type dp3_t
 
 contains
@@ -187,6 +202,29 @@ contains
       dp1_ledger_id = this%id
    end function dp1_ledger_id
 
+   subroutine dp1_assign(lhs, rhs)
+      !! Copying is forbidden: a copy would share the ledger id and the
+      !! device mapping. Copy `data` explicitly if that is what you want.
+      !! (gfortran and nvfortran bypass this for a *component* of an
+      !! assigned parent type; the ledger then reports the double destroy.)
+      class(dp1_t), intent(inout) :: lhs
+      class(dp1_t), intent(in) :: rhs
+      call mem_fatal("assignment of dp1_t is not allowed (copying '"// &
+                     mem_object_name(rhs%id)//"'); copy %data explicitly instead")
+      if (lhs%id /= 0) continue
+   end subroutine dp1_assign
+
+#ifndef DEVARRAY_NO_FINAL
+   subroutine dp1_final(this)
+      !! Safety net, not the primary API: locals, components and
+      !! deallocated objects are cleaned up automatically, but main-program
+      !! and module variables are never finalized (by the standard), and
+      !! nvfortran misses function results, so keep calling `destroy`.
+      type(dp1_t), intent(inout) :: this
+      call this%destroy()
+   end subroutine dp1_final
+#endif
+
    ! ======================================================== dp2_t
 
    subroutine dp2_create(this, name, ub, tag, lb, fill)
@@ -296,6 +334,29 @@ contains
       dp2_ledger_id = this%id
    end function dp2_ledger_id
 
+   subroutine dp2_assign(lhs, rhs)
+      !! Copying is forbidden: a copy would share the ledger id and the
+      !! device mapping. Copy `data` explicitly if that is what you want.
+      !! (gfortran and nvfortran bypass this for a *component* of an
+      !! assigned parent type; the ledger then reports the double destroy.)
+      class(dp2_t), intent(inout) :: lhs
+      class(dp2_t), intent(in) :: rhs
+      call mem_fatal("assignment of dp2_t is not allowed (copying '"// &
+                     mem_object_name(rhs%id)//"'); copy %data explicitly instead")
+      if (lhs%id /= 0) continue
+   end subroutine dp2_assign
+
+#ifndef DEVARRAY_NO_FINAL
+   subroutine dp2_final(this)
+      !! Safety net, not the primary API: locals, components and
+      !! deallocated objects are cleaned up automatically, but main-program
+      !! and module variables are never finalized (by the standard), and
+      !! nvfortran misses function results, so keep calling `destroy`.
+      type(dp2_t), intent(inout) :: this
+      call this%destroy()
+   end subroutine dp2_final
+#endif
+
    ! ======================================================== dp3_t
 
    subroutine dp3_create(this, name, ub, tag, lb, fill)
@@ -404,5 +465,28 @@ contains
       class(dp3_t), intent(in) :: this
       dp3_ledger_id = this%id
    end function dp3_ledger_id
+
+   subroutine dp3_assign(lhs, rhs)
+      !! Copying is forbidden: a copy would share the ledger id and the
+      !! device mapping. Copy `data` explicitly if that is what you want.
+      !! (gfortran and nvfortran bypass this for a *component* of an
+      !! assigned parent type; the ledger then reports the double destroy.)
+      class(dp3_t), intent(inout) :: lhs
+      class(dp3_t), intent(in) :: rhs
+      call mem_fatal("assignment of dp3_t is not allowed (copying '"// &
+                     mem_object_name(rhs%id)//"'); copy %data explicitly instead")
+      if (lhs%id /= 0) continue
+   end subroutine dp3_assign
+
+#ifndef DEVARRAY_NO_FINAL
+   subroutine dp3_final(this)
+      !! Safety net, not the primary API: locals, components and
+      !! deallocated objects are cleaned up automatically, but main-program
+      !! and module variables are never finalized (by the standard), and
+      !! nvfortran misses function results, so keep calling `destroy`.
+      type(dp3_t), intent(inout) :: this
+      call this%destroy()
+   end subroutine dp3_final
+#endif
 
 end module devarray

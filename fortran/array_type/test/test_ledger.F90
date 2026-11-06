@@ -6,7 +6,7 @@ program test_ledger
    implicit none
 
    type(dp1_t) :: a1
-   type(dp2_t) :: a2, copy2
+   type(dp2_t) :: a2
    type(dp3_t) :: a3
    integer :: ta, tb, fails
    integer(int64) :: b1, b2, b3
@@ -49,14 +49,22 @@ program test_ledger
    call a1%destroy()   ! idempotent on an empty object
    call check(mem_live_count() == 2, "second destroy is a no-op")
 
-   ! Copy detection: a copy shares the ledger id; once the original is
-   ! destroyed the copy's id is dead, so its destroy would be fatal.
-   copy2 = a2
-   call check(copy2%ledger_id() == a2%ledger_id(), "intrinsic copy duplicates the id")
    call a2%destroy()
-   call check(.not. mem_is_live(copy2%ledger_id()), "copy's id is dead after original destroy")
-   call check(mem_object_name(copy2%ledger_id()) == "a2", "dead id still resolves to its name")
-   deallocate (copy2%data)   ! drop the copy's storage without touching the ledger
+
+#ifndef DEVARRAY_NO_FINAL
+   ! Finalizer safety net: none of these call destroy explicitly.
+   call forget_local(tb)
+   call check(mem_live_count(tb) == 1 .and. mem_device_bytes(tb) == 0, &
+              "final: mapped local retired at end of subroutine")
+   call forget_allocatable(tb)
+   call check(mem_live_count(tb) == 1, "final: deallocate retires an allocatable object")
+   call forget_component(tb)
+   call check(mem_live_count(tb) == 1, "final: component of a local parent retired")
+   ! The actual must not be SAVEd (main-program variables are implicitly
+   ! SAVE): nvfortran 26.5 skips intent(out) finalization for SAVEd actuals.
+   call intent_out_case(tb)
+   call check(mem_live_count(tb) == 1, "final: intent(out) dummy retired on entry")
+#endif
 
    call check(mem_check_leaks() == 1, "one leak before last destroy")
    call a3%destroy()
@@ -71,6 +79,45 @@ program test_ledger
    print '(a)', 'test_ledger: all checks passed'
 
 contains
+
+   subroutine forget_local(tag)
+      integer, intent(in) :: tag
+      type(dp2_t) :: x
+      call x%create("local x", [100, 100], tag=tag, fill=0.0_dp)
+      call x%to_device()
+   end subroutine forget_local
+
+   subroutine forget_allocatable(tag)
+      integer, intent(in) :: tag
+      type(dp2_t), allocatable :: x
+      allocate (x)
+      call x%create("allocatable x", [10, 10], tag=tag)
+      deallocate (x)
+      call check(mem_live_count(tag) == 1, "final: (inside) retired before scope end")
+   end subroutine forget_allocatable
+
+   subroutine forget_component(tag)
+      integer, intent(in) :: tag
+      type :: holder_t
+         type(dp2_t) :: w
+      end type holder_t
+      type(holder_t) :: h
+      call h%w%create("holder%w", [10, 10], tag=tag)
+   end subroutine forget_component
+
+   subroutine intent_out_case(tag)
+      integer, intent(in) :: tag
+      type(dp1_t) :: y
+      call y%create("intent(out) y", [5], tag=tag)
+      call reset_out(y)
+      call check(.not. y%is_created() .and. mem_live_count(tag) == 1, &
+                 "final: (inside) intent(out) retired before return")
+   end subroutine intent_out_case
+
+   subroutine reset_out(x)
+      type(dp1_t), intent(out) :: x
+      if (x%is_created()) continue
+   end subroutine reset_out
 
    subroutine check(ok, what)
       logical, intent(in) :: ok

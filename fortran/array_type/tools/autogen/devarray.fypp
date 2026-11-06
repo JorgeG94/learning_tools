@@ -50,6 +50,11 @@ module devarray
       procedure :: is_created => ${k}$${r}$_is_created
       procedure :: is_on_device => ${k}$${r}$_is_on_device
       procedure :: ledger_id => ${k}$${r}$_ledger_id
+      procedure, private :: ${k}$${r}$_assign
+      generic :: assignment(=) => ${k}$${r}$_assign
+#ifndef DEVARRAY_NO_FINAL
+      final :: ${k}$${r}$_final
+#endif
    end type ${k}$${r}$_t
 
 #:endfor
@@ -166,6 +171,29 @@ contains
       class(${k}$${r}$_t), intent(in) :: this
       ${k}$${r}$_ledger_id = this%id
    end function ${k}$${r}$_ledger_id
+
+   subroutine ${k}$${r}$_assign(lhs, rhs)
+      !! Copying is forbidden: a copy would share the ledger id and the
+      !! device mapping. Copy `data` explicitly if that is what you want.
+      !! (gfortran and nvfortran bypass this for a *component* of an
+      !! assigned parent type; the ledger then reports the double destroy.)
+      class(${k}$${r}$_t), intent(inout) :: lhs
+      class(${k}$${r}$_t), intent(in) :: rhs
+      call mem_fatal("assignment of ${k}$${r}$_t is not allowed (copying '"// &
+                     mem_object_name(rhs%id)//"'); copy %data explicitly instead")
+      if (lhs%id /= 0) continue
+   end subroutine ${k}$${r}$_assign
+
+#ifndef DEVARRAY_NO_FINAL
+   subroutine ${k}$${r}$_final(this)
+      !! Safety net, not the primary API: locals, components and
+      !! deallocated objects are cleaned up automatically, but main-program
+      !! and module variables are never finalized (by the standard), and
+      !! nvfortran misses function results, so keep calling `destroy`.
+      type(${k}$${r}$_t), intent(inout) :: this
+      call this%destroy()
+   end subroutine ${k}$${r}$_final
+#endif
 
 #:endfor
 #:endfor
