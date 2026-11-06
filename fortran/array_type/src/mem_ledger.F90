@@ -17,10 +17,13 @@ module mem_ledger
    !! Not thread safe by design: tracking happens at init and teardown,
    !! never inside parallel regions.
    use, intrinsic :: iso_fortran_env, only: int64, real64, error_unit, output_unit
+   use, intrinsic :: iso_c_binding, only: c_ptr, c_null_ptr
    implicit none
    private
 
    public :: MEM_TAG_NAME_LEN, MEM_OBJ_NAME_LEN, MEM_UNTAGGED
+   public :: MEM_KIND_RAW, MEM_KIND_R64, MEM_KIND_R32, MEM_KIND_I32, MEM_KIND_I64
+   public :: mem_object_t, mem_num_objects, mem_get_object
    public :: mem_register_tag, mem_tag_name, mem_num_tags
    public :: mem_track, mem_untrack, mem_track_device, mem_untrack_device
    public :: mem_is_live, mem_object_name
@@ -33,6 +36,14 @@ module mem_ledger
    integer, parameter :: MEM_UNTAGGED = 0
    integer, parameter :: MAX_TAGS = 64
 
+   ! Element kind of a tracked object, so collective operations know how to
+   ! view its memory. RAW objects can be moved (update) but not interpreted.
+   integer, parameter :: MEM_KIND_RAW = 0
+   integer, parameter :: MEM_KIND_R64 = 1
+   integer, parameter :: MEM_KIND_R32 = 2
+   integer, parameter :: MEM_KIND_I32 = 3
+   integer, parameter :: MEM_KIND_I64 = 4
+
    type :: tag_stats_t
       character(len=MEM_TAG_NAME_LEN) :: name = ''
       integer(int64) :: host = 0, host_peak = 0
@@ -40,16 +51,22 @@ module mem_ledger
       integer :: live = 0
    end type tag_stats_t
 
-   type :: obj_t
+   type :: mem_object_t
+      !! One ledger entry. `mem_get_object` hands out copies; the registry
+      !! itself is private.
       character(len=MEM_OBJ_NAME_LEN) :: name = ''
       integer :: tag = MEM_UNTAGGED
-      integer(int64) :: host = 0, dev = 0
+      integer(int64) :: host = 0          !! host bytes
+      integer(int64) :: dev = 0           !! device bytes (0 = not mapped)
       logical :: live = .false.
-   end type obj_t
+      type(c_ptr) :: addr = c_null_ptr    !! host address of the first element
+      integer :: kind_code = MEM_KIND_RAW
+      integer(int64) :: nelem = 0
+   end type mem_object_t
 
    type(tag_stats_t), save :: tags(0:MAX_TAGS)
    integer, save :: n_tags = 0
-   type(obj_t), allocatable, save :: objs(:)
+   type(mem_object_t), allocatable, save :: objs(:)
    integer(int64), save :: n_objs = 0
    integer(int64), save :: tot_host = 0, tot_host_peak = 0
    integer(int64), save :: tot_dev = 0, tot_dev_peak = 0
@@ -92,11 +109,17 @@ contains
 
    ! ------------------------------------------------------------- tracking
 
-   integer(int64) function mem_track(name, tag, nbytes) result(id)
+   integer(int64) function mem_track(name, tag, nbytes, addr, kind_code, nelem) result(id)
       !! Register a new live object holding `nbytes` of host memory.
+      !! `addr`/`kind_code`/`nelem` make it visible to `mem_collective`; the
+      !! address must stay valid until `mem_untrack`, so the owner must never
+      !! reallocate behind the ledger's back.
       character(len=*), intent(in) :: name
       integer, intent(in) :: tag
       integer(int64), intent(in) :: nbytes
+      type(c_ptr), intent(in), optional :: addr
+      integer, intent(in), optional :: kind_code
+      integer(int64), intent(in), optional :: nelem
       call check_tag(tag, "mem_track")
       call grow_registry()
       n_objs = n_objs + 1
@@ -106,6 +129,12 @@ contains
       objs(id)%host = nbytes
       objs(id)%dev = 0
       objs(id)%live = .true.
+      objs(id)%addr = c_null_ptr
+      objs(id)%kind_code = MEM_KIND_RAW
+      objs(id)%nelem = 0
+      if (present(addr)) objs(id)%addr = addr
+      if (present(kind_code)) objs(id)%kind_code = kind_code
+      if (present(nelem)) objs(id)%nelem = nelem
 
       tags(tag)%live = tags(tag)%live + 1
       tags(tag)%host = tags(tag)%host + nbytes
@@ -126,6 +155,7 @@ contains
       tags(tag)%host = tags(tag)%host - objs(id)%host
       tot_host = tot_host - objs(id)%host
       objs(id)%live = .false.
+      objs(id)%addr = c_null_ptr
    end subroutine mem_untrack
 
    subroutine mem_track_device(id, nbytes)
@@ -169,6 +199,19 @@ contains
          name = "(unknown id)"
       end if
    end function mem_object_name
+
+   integer(int64) function mem_num_objects()
+      !! Number of objects ever tracked; valid ids are 1..mem_num_objects().
+      mem_num_objects = n_objs
+   end function mem_num_objects
+
+   function mem_get_object(id) result(obj)
+      !! Copy of entry `id` (live or dead). Iterate 1..mem_num_objects().
+      integer(int64), intent(in) :: id
+      type(mem_object_t) :: obj
+      if (id < 1 .or. id > n_objs) call mem_fatal("mem_get_object: unknown ledger id")
+      obj = objs(id)
+   end function mem_get_object
 
    ! -------------------------------------------------------------- queries
    ! Without `tag` these return the process total.
@@ -309,7 +352,7 @@ contains
    end subroutine check_live
 
    subroutine grow_registry()
-      type(obj_t), allocatable :: tmp(:)
+      type(mem_object_t), allocatable :: tmp(:)
       if (.not. allocated(objs)) allocate (objs(64))
       if (n_objs < size(objs, kind=int64)) return
       allocate (tmp(2*size(objs)))

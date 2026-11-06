@@ -15,9 +15,14 @@ module devarray
    !!   and the second destroy is reported as a fatal error.
    !! * Without OpenACC, `to_device`/`update_*` are no-ops and device bytes
    !!   stay zero, so the same code builds and runs on a CPU.
+   !! * The ledger records the address of `data` so that `mem_collective` can
+   !!   operate on every array with a tag. Never `allocate`, `deallocate` or
+   !!   `move_alloc` `data` yourself: only `create`/`destroy` may.
    use, intrinsic :: iso_fortran_env, only: real64, int64
+   use, intrinsic :: iso_c_binding, only: c_ptr, c_loc, c_null_ptr
    use mem_ledger, only: mem_track, mem_untrack, mem_track_device, mem_untrack_device, &
-                         mem_is_live, mem_object_name, mem_fatal, MEM_UNTAGGED
+                         mem_is_live, mem_object_name, mem_fatal, MEM_UNTAGGED, &
+                         MEM_KIND_R64
    implicit none
    private
 
@@ -98,13 +103,14 @@ contains
    subroutine dp1_create(this, name, ub, tag, lb, fill)
       !! Allocate `data(lb(1):ub(1), ...)` on the host and register it.
       !! `lb` defaults to 1. `tag` comes from `mem_register_tag`.
-      class(dp1_t), intent(inout) :: this
+      class(dp1_t), intent(inout), target :: this
       character(len=*), intent(in) :: name
       integer, intent(in) :: ub(1)
       integer, intent(in), optional :: tag
       integer, intent(in), optional :: lb(1)
       real(dp), intent(in), optional :: fill
       integer :: lo(1), t, ierr
+      type(c_ptr) :: addr
 
       if (this%state /= ST_EMPTY) &
          call mem_fatal("create: '"//name//"' already created (as '"// &
@@ -119,7 +125,10 @@ contains
       if (ierr /= 0) call mem_fatal("create: host allocation failed for '"//name//"'")
       if (present(fill)) this%data = fill
 
-      this%id = mem_track(name, t, this%bytes())
+      addr = c_null_ptr
+      if (size(this%data) > 0) addr = c_loc(this%data)
+      this%id = mem_track(name, t, this%bytes(), addr=addr, kind_code=MEM_KIND_R64, &
+                          nelem=size(this%data, kind=int64))
       this%state = ST_HOST
    end subroutine dp1_create
 
@@ -230,13 +239,14 @@ contains
    subroutine dp2_create(this, name, ub, tag, lb, fill)
       !! Allocate `data(lb(1):ub(1), ...)` on the host and register it.
       !! `lb` defaults to 1. `tag` comes from `mem_register_tag`.
-      class(dp2_t), intent(inout) :: this
+      class(dp2_t), intent(inout), target :: this
       character(len=*), intent(in) :: name
       integer, intent(in) :: ub(2)
       integer, intent(in), optional :: tag
       integer, intent(in), optional :: lb(2)
       real(dp), intent(in), optional :: fill
       integer :: lo(2), t, ierr
+      type(c_ptr) :: addr
 
       if (this%state /= ST_EMPTY) &
          call mem_fatal("create: '"//name//"' already created (as '"// &
@@ -251,7 +261,10 @@ contains
       if (ierr /= 0) call mem_fatal("create: host allocation failed for '"//name//"'")
       if (present(fill)) this%data = fill
 
-      this%id = mem_track(name, t, this%bytes())
+      addr = c_null_ptr
+      if (size(this%data) > 0) addr = c_loc(this%data)
+      this%id = mem_track(name, t, this%bytes(), addr=addr, kind_code=MEM_KIND_R64, &
+                          nelem=size(this%data, kind=int64))
       this%state = ST_HOST
    end subroutine dp2_create
 
@@ -362,13 +375,14 @@ contains
    subroutine dp3_create(this, name, ub, tag, lb, fill)
       !! Allocate `data(lb(1):ub(1), ...)` on the host and register it.
       !! `lb` defaults to 1. `tag` comes from `mem_register_tag`.
-      class(dp3_t), intent(inout) :: this
+      class(dp3_t), intent(inout), target :: this
       character(len=*), intent(in) :: name
       integer, intent(in) :: ub(3)
       integer, intent(in), optional :: tag
       integer, intent(in), optional :: lb(3)
       real(dp), intent(in), optional :: fill
       integer :: lo(3), t, ierr
+      type(c_ptr) :: addr
 
       if (this%state /= ST_EMPTY) &
          call mem_fatal("create: '"//name//"' already created (as '"// &
@@ -383,7 +397,10 @@ contains
       if (ierr /= 0) call mem_fatal("create: host allocation failed for '"//name//"'")
       if (present(fill)) this%data = fill
 
-      this%id = mem_track(name, t, this%bytes())
+      addr = c_null_ptr
+      if (size(this%data) > 0) addr = c_loc(this%data)
+      this%id = mem_track(name, t, this%bytes(), addr=addr, kind_code=MEM_KIND_R64, &
+                          nelem=size(this%data, kind=int64))
       this%state = ST_HOST
    end subroutine dp3_create
 

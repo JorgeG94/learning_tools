@@ -25,7 +25,8 @@ else ifeq ($(COMPILER),intel)
   ACC := 0
 else
   FC := gfortran
-  FFLAGS := -O2 -cpp -std=f2023 -Wall -Wextra -Wno-compare-reals -fcheck=all
+  # -Wno-external-argument-mismatch: gfortran 15.1 bug, see mem_collective.F90
+  FFLAGS := -O2 -cpp -std=f2023 -Wall -Wextra -Wno-compare-reals -Wno-external-argument-mismatch -fcheck=all
   MODFLAG := -J
   ACC := 0
 endif
@@ -36,10 +37,10 @@ ifeq ($(NO_FINAL),1)
 endif
 
 BUILD := build/$(COMPILER)-acc$(ACC)$(FINAL_TAG)
-LIB_SRC := src/mem_ledger.F90 src/mem_device.F90 src/devarray.F90
+LIB_SRC := src/mem_ledger.F90 src/mem_device.F90 src/devarray.F90 src/mem_collective.F90
 LIB_OBJ := $(patsubst src/%.F90,$(BUILD)/%.o,$(LIB_SRC))
 
-all: $(BUILD)/swe $(BUILD)/test_ledger $(BUILD)/test_copy_forbidden
+all: $(BUILD)/swe $(BUILD)/test_ledger $(BUILD)/test_copy_forbidden $(BUILD)/test_collective
 
 $(BUILD):
 	mkdir -p $@
@@ -59,14 +60,19 @@ $(BUILD)/test_ledger: test/test_ledger.F90 $(LIB_OBJ)
 $(BUILD)/test_copy_forbidden: test/test_copy_forbidden.F90 $(LIB_OBJ)
 	$(FC) $(FFLAGS) $(MODFLAG) $(BUILD) $^ -o $@
 
+$(BUILD)/test_collective: test/test_collective.F90 $(LIB_OBJ)
+	$(FC) $(FFLAGS) $(MODFLAG) $(BUILD) $^ -o $@
+
 # module dependencies
 $(BUILD)/devarray.o: $(BUILD)/mem_ledger.o
+$(BUILD)/mem_collective.o: $(BUILD)/mem_ledger.o
 
 run: $(BUILD)/swe
 	$(BUILD)/swe $(ARGS)
 
-test: $(BUILD)/test_ledger $(BUILD)/test_copy_forbidden
+test: $(BUILD)/test_ledger $(BUILD)/test_copy_forbidden $(BUILD)/test_collective
 	$(BUILD)/test_ledger
+	$(BUILD)/test_collective
 	@if $(BUILD)/test_copy_forbidden >/dev/null 2>&1; then \
 	  echo "test_copy_forbidden: FAIL (copy was allowed)"; exit 1; \
 	else echo "test_copy_forbidden: ok (copy rejected)"; fi

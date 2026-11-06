@@ -7,6 +7,7 @@ program swe
    use mem_ledger, only: mem_report, mem_check_leaks, mem_device_bytes, mem_host_bytes, &
                          mem_human_bytes, mem_register_tag
    use mem_device, only: device_init, device_free_bytes, device_enabled
+   use mem_collective, only: mem_checksum_t, mem_checksum, mem_update_host, mem_report_values
    use swe_model, only: swe_params_t, swe_state_t, swe_work_t, swe_step, &
                         swe_total_mass, swe_total_energy
    implicit none
@@ -19,6 +20,8 @@ program swe
    character(len=64) :: arg
    integer(int64) :: free_before, free_after, measured, ledger_dev, t0, t1, rate
    real(dp) :: mass0, mass1, e0, e1, secs
+   type(mem_checksum_t) :: cs0, cs1
+   integer :: tag_state
 
    nsteps = 1000
    leak = .false.
@@ -62,6 +65,12 @@ program swe
    mass0 = swe_total_mass(state, p)
    e0 = swe_total_energy(state, p)
 
+   ! Collective ops through the ledger: one call pulls every state array
+   ! back, whatever it is, and summarises it. No list of arrays here.
+   tag_state = mem_register_tag("swe_state")
+   call mem_update_host(tag_state)
+   cs0 = mem_checksum(tag_state)
+
    call system_clock(t0, rate)
    do n = 1, nsteps
       call swe_step(state, work, p)
@@ -78,9 +87,13 @@ program swe
    write (output_unit, '(a, es12.4)') 'relative mass change   : ', (mass1 - mass0)/mass0
    write (output_unit, '(a, es12.4)') 'relative energy change : ', (e1 - e0)/e0
 
-   ! Pull the state back once to show update_host; check the max depth.
-   call state%h%update_host()
+   call mem_update_host(tag_state)
+   cs1 = mem_checksum(tag_state)
    write (output_unit, '(a, f12.6)') 'max h after run        : ', maxval(state%h%data(1:p%nx, 1:p%ny))
+   write (output_unit, '(/, a, i0, a, i0, a)') 'swe_state checksum (', cs1%nobj, ' arrays, ', cs1%nelem, ' values)'
+   write (output_unit, '(a, es24.16, a, z16.16)') '  before: sum ', cs0%sum, '  hash ', cs0%hash
+   write (output_unit, '(a, es24.16, a, z16.16)') '  after : sum ', cs1%sum, '  hash ', cs1%hash
+   call mem_report_values(tag_state)
 
    call work%destroy()
    if (.not. leak) call state%destroy()
